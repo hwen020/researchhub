@@ -1,20 +1,23 @@
+import csv
+import io
 import os
 from typing import Dict, List, Literal
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 from sqlalchemy.exc import OperationalError
 
 from .auth import hash_password, require_project, verify_password
 from .db import connect
 from .finance import decide, request_funds
-from .models import budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, users, versions, workflow_runs
+from .models import audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, users, versions, workers, workflow_runs
 from .plugins import validate_parameters
-from .queue import IdempotencyConflict, cancel, submit
-from .registry import MAX_UPLOAD, download, register, upload
+from .queue import IdempotencyConflict, cancel, now_ms, submit
+from .registry import MAX_UPLOAD, compute_inputs, download, register, upload
 from .storage import LocalStorage
 from .workflows import start
 
@@ -30,9 +33,16 @@ class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class DatasetReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    version: int = Field(ge=1, strict=True)
+
+
 class JobInput(RequestModel):
     plugin: Literal["summary@1", "age-association@1"]
-    parameters: dict
+    parameters: dict | None = None
+    dataset: DatasetReference | None = None
     timeout_ms: int = Field(30_000, ge=1000, le=300_000)
     max_attempts: int = Field(3, ge=1, le=8)
 
@@ -88,6 +98,44 @@ def public_job(job):
     return {key: job[key] for key in ("id", "state", "plugin", "attempt", "created_at", "result")}
 
 
+def log_action(connection, user, project, action, subject):
+    connection.execute(audit.insert().values(
+        project_id=project, actor_id=user["id"], action=action,
+        subject_id=subject, timestamp=now_ms(connection),
+    ))
+
+
+@app.get("/projects/{project_id}/audit")
+def project_audit(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, {"pi", "finance"})
+    query = select(audit).where(audit.c.project_id == project).order_by(audit.c.id.desc()).limit(100)
+    return [dict(row) for row in connection.execute(query).mappings()]
+
+
+@app.get("/projects/{project_id}/jobs/{job_id}/download/{kind}")
+def download_job(project_id: UUID, job_id: UUID, kind: Literal["manifest", "json", "csv"],
+                 user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    row = connection.execute(select(jobs.c.manifest, jobs.c.result).where(
+        jobs.c.project_id == project, jobs.c.id == str(job_id), jobs.c.state == "SUCCEEDED",
+    )).mappings().one_or_none()
+    if row is None or (kind == "manifest" and row["manifest"] is None):
+        raise HTTPException(404, "Artifact not available")
+    filename = "manifest.json" if kind == "manifest" else "result." + kind
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"}
+    log_action(connection, user, project, "job_artifact_download", str(job_id))
+    if kind != "csv":
+        return JSONResponse(row["manifest"] if kind == "manifest" else row["result"], headers=headers)
+    records = row["result"].get("associations", [row["result"]])
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=list(records[0]))
+    writer.writeheader()
+    writer.writerows(records)
+    return Response(stream.getvalue(), media_type="text/csv", headers=headers)
+
+
 @app.get("/healthz")
 def health():
     return {"status": "ok"}
@@ -95,7 +143,8 @@ def health():
 
 @app.get("/readyz")
 def ready(connection=Depends(transaction, scope="function")):
-    connection.execute(select(jobs.c.id).limit(1))
+    connection.execute(select(jobs.c.id, jobs.c.manifest).limit(1))
+    connection.execute(select(workers.c.id).limit(1))
     return {"status": "ready"}
 
 
@@ -104,14 +153,26 @@ def metrics(user=Depends(authenticate), connection=Depends(transaction, scope="f
     if not user["platform_admin"]:
         raise HTTPException(403, "Platform administrator required")
     counts = connection.execute(select(jobs.c.state, func.count()).group_by(jobs.c.state))
-    return {"jobs_by_state": dict(counts.all())}
+    states = dict(counts.all())
+    active = connection.execute(select(func.count()).select_from(workers).where(
+        workers.c.last_seen > now_ms(connection) - 10_000,
+    )).scalar_one()
+    retries = connection.execute(select(func.count()).select_from(events).where(
+        events.c.state == "RETRYING",
+    )).scalar_one()
+    return {"jobs_by_state": states, "workers_online": active, "retries": retries,
+            "queue_depth": states.get("QUEUED", 0) + states.get("RETRYING", 0)}
 
 
 @app.get("/projects")
 def list_projects(user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     query = select(projects.c.id, projects.c.name, organizations.c.name.label("organization")).join(organizations)
     if not user["platform_admin"]:
-        query = query.join(memberships, memberships.c.project_id == projects.c.id).where(memberships.c.user_id == user["id"])
+        query = query.join(memberships, memberships.c.project_id == projects.c.id).where(
+            memberships.c.user_id == user["id"],
+        ).add_columns(memberships.c.role)
+    else:
+        query = query.add_columns(literal("platform_admin").label("role"))
     return [dict(row) for row in connection.execute(query.order_by(projects.c.name, projects.c.id)).mappings()]
 
 
@@ -123,14 +184,24 @@ def submit_job(project_id: UUID, body: JobInput,
     authorize(connection, user, project, COMPUTE_ROLES)
     if key.startswith("dag:"):
         raise HTTPException(422, "Reserved idempotency prefix")
+    if (body.parameters is None) == (body.dataset is None):
+        raise HTTPException(422, "Provide either parameters or a dataset version")
     try:
-        parameters = validate_parameters(body.plugin, body.parameters)
+        parameters, provenance = body.parameters, None
+        if body.dataset is not None:
+            parameters, provenance = compute_inputs(
+                connection, storage(), project, str(body.dataset.id), body.dataset.version, body.plugin,
+            )
+        parameters = validate_parameters(body.plugin, parameters)
         job = submit(connection, project, key, body.plugin, parameters,
-                     max_attempts=body.max_attempts, timeout_ms=body.timeout_ms)
+                     max_attempts=body.max_attempts, timeout_ms=body.timeout_ms, provenance=provenance)
+    except LookupError as exc:
+        raise HTTPException(404, "Dataset version not found") from exc
     except IdempotencyConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    log_action(connection, user, project, "job_submission", job["id"])
     return public_job(job)
 
 
@@ -161,6 +232,7 @@ def cancel_job(project_id: UUID, job_id: UUID, user=Depends(authenticate), conne
         state = cancel(connection, project, str(job_id))
     except LookupError as exc:
         raise HTTPException(404, "Job not found") from exc
+    log_action(connection, user, project, "job_cancellation", str(job_id))
     return {"state": state}
 
 
@@ -175,6 +247,7 @@ def start_workflow(project_id: UUID, body: WorkflowInput, user=Depends(authentic
         run_id = start(connection, project, definition)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    log_action(connection, user, project, "workflow_started", run_id)
     return {"id": run_id}
 
 
@@ -191,9 +264,16 @@ def list_workflows(project_id: UUID, user=Depends(authenticate), connection=Depe
 @app.get("/projects/{project_id}/funding")
 def funding(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
-    authorize(connection, user, project, {"pi", "finance"})
+    authorize(connection, user, project, ALL_ROLES)
     budget = connection.execute(select(budgets).where(budgets.c.project_id == project)).mappings().one()
-    query = select(funding_requests).where(funding_requests.c.project_id == project).limit(100)
+    query = select(funding_requests).where(funding_requests.c.project_id == project)
+    if not user["platform_admin"]:
+        role = connection.execute(select(memberships.c.role).where(
+            memberships.c.project_id == project, memberships.c.user_id == user["id"],
+        )).scalar_one()
+        if role == "researcher":
+            query = query.where(funding_requests.c.requester == user["id"])
+    query = query.order_by(funding_requests.c.id).limit(100)
     return {"budget": dict(budget), "requests": [dict(row) for row in connection.execute(query).mappings()]}
 
 
@@ -204,7 +284,9 @@ def submit_funding(project_id: UUID, body: FundingInput,
     project = str(project_id)
     authorize(connection, user, project, COMPUTE_ROLES)
     try:
-        return {"id": request_funds(connection, project, user["id"], key, body.amount, body.purpose)}
+        request_id = request_funds(connection, project, user["id"], key, body.amount, body.purpose)
+        log_action(connection, user, project, "funding_requested", request_id)
+        return {"id": request_id}
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -215,7 +297,9 @@ def review_funding(project_id: UUID, request_id: UUID, body: DecisionInput,
     project = str(project_id)
     authorize(connection, user, project, {"finance"})
     try:
-        return {"state": decide(connection, project, str(request_id), user["id"], body.approve)}
+        state = decide(connection, project, str(request_id), user["id"], body.approve)
+        log_action(connection, user, project, "funding_reviewed", str(request_id))
+        return {"state": state}
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except PermissionError as exc:
@@ -251,7 +335,9 @@ def list_datasets(project_id: UUID, user=Depends(authenticate), connection=Depen
 def register_dataset(project_id: UUID, body: DatasetInput, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
     authorize(connection, user, project, COMPUTE_ROLES)
-    return {"id": register(connection, project, user["id"], body.name)}
+    dataset_id = register(connection, project, user["id"], body.name)
+    log_action(connection, user, project, "dataset_registered", dataset_id)
+    return {"id": dataset_id}
 
 
 @app.get("/projects/{project_id}/datasets/{dataset_id}/versions")
@@ -268,7 +354,9 @@ def upload_dataset(project_id: UUID, dataset_id: UUID, user=Depends(authenticate
     project = str(project_id)
     authorize(connection, user, project, COMPUTE_ROLES)
     try:
-        return upload(connection, storage(), project, str(dataset_id), data)
+        version = upload(connection, storage(), project, str(dataset_id), data)
+        log_action(connection, user, project, "dataset_uploaded", version["id"])
+        return version
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -284,8 +372,8 @@ def download_dataset(project_id: UUID, dataset_id: UUID, version: int,
         data = download(connection, storage(), project, str(dataset_id), version)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    log_action(connection, user, project, "dataset_downloaded", str(dataset_id))
     return Response(data, media_type="text/csv", headers={
         "Content-Disposition": 'attachment; filename="dataset.csv"',
         "X-Content-Type-Options": "nosniff",
     })
-

@@ -56,6 +56,11 @@ jobs = Table(
 )
 Index("jobs_ready", jobs.c.state, jobs.c.available_at)
 Index("jobs_lease", jobs.c.state, jobs.c.lease_until)
+workers = Table(
+    "worker_heartbeats", metadata,
+    Column("id", String(100), primary_key=True),
+    Column("last_seen", BigInteger, nullable=False, index=True),
+)
 events = Table(
     "job_events", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

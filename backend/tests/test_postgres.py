@@ -1,6 +1,8 @@
 import os
+import hashlib
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -11,8 +13,11 @@ from sqlalchemy.engine import make_url
 
 from researchhub.db import connect
 from researchhub.finance import decide, request_funds
-from researchhub.models import budgets, events, jobs, metadata, organizations, projects, users
-from researchhub.queue import claim, finish, submit
+from researchhub.auth import hash_password
+from researchhub.models import budgets, events, jobs, memberships, metadata, organizations, projects, users
+from researchhub.queue import cancel, claim, finish, submit
+from researchhub.models import workflow_runs
+from researchhub.workflows import start
 
 URL = os.environ.get("RESEARCHHUB_TEST_DATABASE")
 
@@ -74,6 +79,74 @@ class PostgresIntegration(unittest.TestCase):
         with self.engine.begin() as conn:
             self.assertEqual(conn.execute(select(budgets.c.spent)).scalar_one(), 70)
 
+    def test_cancellation_and_completion_race_have_one_terminal_outcome(self):
+        with self.engine.begin() as conn:
+            job = submit(conn, "project", "race", "summary@1", {"observations": [1, 2]})
+            lease = claim(conn, "worker")
+
+        def cancel_job():
+            with self.engine.begin() as conn:
+                return cancel(conn, "project", job["id"])
+
+        def complete_job():
+            with self.engine.begin() as conn:
+                return finish(conn, job["id"], lease["token"], result={"mean": "1.5"})
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cancellation = pool.submit(cancel_job)
+            completion = pool.submit(complete_job)
+            self.assertTrue(completion.result())
+            self.assertIn(cancellation.result(), ("SUCCEEDED", "CANCEL_REQUESTED"))
+        with self.engine.begin() as conn:
+            state, result = conn.execute(select(jobs.c.state, jobs.c.result)).one()
+            self.assertIn((state, result), (("CANCELLED", None), ("SUCCEEDED", {"mean": "1.5"})))
+
+    def test_http_project_isolation_and_dataset_manifest(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from researchhub import api
+
+        project, other = str(uuid4()), str(uuid4())
+        password = "synthetic fixture only"
+        with self.engine.begin() as conn:
+            conn.execute(projects.insert(), [
+                {"id": key, "organization_id": "org", "name": name}
+                for key, name in ((project, "Primary"), (other, "Other"))
+            ])
+            for name, allowed in (("primary", project), ("other", other)):
+                conn.execute(users.insert().values(id=name, username=name, password_hash=hash_password(password)))
+                conn.execute(memberships.insert().values(project_id=allowed, user_id=name, role="pi"))
+        with tempfile.TemporaryDirectory() as directory, patch.object(api, "engine", self.engine), patch.dict(
+            os.environ, RESEARCHHUB_STORAGE=directory, RESEARCHHUB_CODE_VERSION="fixture",
+        ), TestClient(api.app) as client:
+            base = "/projects/" + project
+            owner, outsider = ("primary", password), ("other", password)
+            created = client.post(base + "/datasets", json={"name": "Synthetic observations"}, auth=owner)
+            assert created.status_code == 200, created.text
+            dataset_id = created.json()["id"]
+            version_url = base + "/datasets/" + dataset_id + "/versions"
+            version = client.post(version_url, content=b"value\n1\n2\n3\n",
+                                  headers={"Content-Type": "text/csv"}, auth=owner)
+            assert version.status_code == 200, version.text
+            body = {"plugin": "summary@1", "dataset": {"id": dataset_id, "version": 1}}
+            result = client.post(base + "/jobs", json=body, headers={"Idempotency-Key": "dataset-job"}, auth=owner)
+            assert result.status_code == 200, result.text
+            job_url = base + "/jobs/" + result.json()["id"]
+            with self.engine.begin() as conn:
+                lease = claim(conn, "manifest-worker")
+                finish(conn, lease["id"], lease["token"], result={"mean": "2"})
+            manifest = client.get(job_url + "/download/manifest", auth=owner).json()
+            self.assertEqual(manifest["dataset"], {"id": dataset_id, "version": 1, "sha256": version.json()["checksum"]})
+            self.assertEqual(manifest["inputs"], {"observations": [1, 2, 3]})
+            self.assertEqual(manifest["output_sha256"], hashlib.sha256(b'{"mean":"2"}').hexdigest())
+            self.assertEqual(manifest["plugin_version"], "1")
+            self.assertEqual(manifest["code_version"], "fixture")
+            for path in (base + "/jobs", job_url + "/events", job_url + "/download/manifest",
+                         version_url + "/1", base + "/audit"):
+                self.assertEqual(client.get(path, auth=outsider).status_code, 404)
+            actions = {entry["action"] for entry in client.get(base + "/audit", auth=owner).json()}
+            self.assertEqual(actions, {"dataset_registered", "dataset_uploaded", "job_submission", "job_artifact_download"})
+
     def launch(self, *args, **kwargs):
         environment = dict(os.environ, DATABASE_URL=self.url.render_as_string(hide_password=False))
         process = subprocess.Popen([sys.executable, "-B", *args], env=environment, **kwargs)
@@ -87,6 +160,41 @@ class PostgresIntegration(unittest.TestCase):
 
         self.addCleanup(stop)
         return process
+
+    def test_scheduler_restart_preserves_parallel_roots_and_dependency(self):
+        def node(*parents):
+            return {"depends_on": list(parents), "plugin": "summary@1",
+                    "parameters": {"observations": [1, 2, 3]}}
+
+        with self.engine.begin() as conn:
+            run = start(conn, "project", {"a": node(), "b": node(), "report": node("a", "b")})
+
+        def status():
+            with self.engine.connect() as conn:
+                return conn.execute(select(workflow_runs).where(workflow_runs.c.id == run)).mappings().one()
+
+        def wait_for(condition):
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if condition():
+                    return
+                time.sleep(.1)
+            self.fail("Timed out waiting for workflow state")
+
+        first = self.launch("-m", "researchhub.scheduler", stdout=subprocess.DEVNULL)
+        wait_for(lambda: all("job_id" in status()["nodes"][name] for name in ("a", "b")))
+        first.kill()
+        first.wait(timeout=10)
+        snapshot = status()["nodes"]
+        self.assertNotIn("job_id", snapshot["report"])
+        self.launch("-m", "researchhub.worker", stdout=subprocess.DEVNULL)
+        self.launch("-m", "researchhub.worker", stdout=subprocess.DEVNULL)
+        self.launch("-m", "researchhub.scheduler", stdout=subprocess.DEVNULL)
+        wait_for(lambda: status()["state"] == "SUCCEEDED")
+        final = status()["nodes"]
+        self.assertEqual({final[name]["job_id"] for name in ("a", "b")},
+                         {snapshot[name]["job_id"] for name in ("a", "b")})
+        self.assertNotIn(final["report"]["job_id"], {final["a"]["job_id"], final["b"]["job_id"]})
 
     def test_worker_computes_after_abrupt_process_loss(self):
         with self.engine.begin() as conn:

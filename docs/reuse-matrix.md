@@ -1,11 +1,11 @@
 # Reuse matrix
 
-| Candidate | Source path and revision | Disposition | Target | Effort and risk |
-| --- | --- | --- | --- | --- |
-| Messenger persistence and wakeup separation | `apps/messenger/api/app/realtime.py` and `main.py`, `5117a166993c3380448822cec9d1f441ad8bfca2` | Pattern reference. Redistribution permission unverified. No code imported. | PostgreSQL queue and persisted events in `backend/researchhub/queue.py` | Medium. Worker leases need new concurrency semantics. |
-| Age-association analysis | `src/aginggenomics/`, public main, SHA unverified | MIT candidate. Review exact revision, dependency footprint and attribution before adapting. | Scientific plugin, pending | Medium. Isolate analytical routines from UI and downloads. |
-| Mobility validation and export | `app/`, public main, SHA unverified | MIT candidate for v2. Review exact revision, transitive licensing and spatial schemas. | Mobility plugin, pending | Medium. Ensure deterministic exports and bound input sizes. |
-| Travel Desk and Enterprise Operations AI | SHA and paths unverified | Source access and redistribution rights pending. | Finance and workspace, pending | High until module boundaries and test coverage can be inspected. |
-| Ads Attribution Pipeline | SHA and paths unverified | No reuse credited. | None | Unknown. |
+| Source and revision | Original path | Stack | Reuse | ResearchHub path | Cost or risk |
+| --- | --- | --- | --- | --- | --- |
+| Aging Genomics Lab `79522083661d35509f3808d7fd9bd494f250001b` | `src/aginggenomics/analysis.py` | NumPy, pandas, SciPy | MIT function bodies extracted for `age_association` and `benjamini_hochberg`. Imports adapted and license preserved. | `backend/researchhub/aging_statistics.py` with adapter in `plugins.py` | Adapter validates bounded data and supplies only the columns the functions need. No measured reuse savings. |
+| Chat-Demo `5117a166993c3380448822cec9d1f441ad8bfca2` | `apps/messenger/api/app/realtime.py`, `main.py` | FastAPI, Redis, PostgreSQL | Design reference. Redistribution rights unverified. | Original persistent queue and history | Queue leases and fencing required new implementation. |
+| Travel Desk `f337cf68c1c11dc93ccc38fac78a963f283c0660` | `workflow.py`, `policies.py` | Python, SQLite | Design reference. No redistribution grant located. | Original budget and request services | Finance consistency uses PostgreSQL row locking. |
+| Enterprise Operations AI `31418b018c90c3e88ac131407a3754dc517a13d7` | `operations/domain.py`, `operations/rules.py` | Python | MIT candidate reviewed at module-inventory level. | None | Administrative demo domain differs from research budgets and memberships. |
+| Wearable Mobility `82cd2f3b9f051c7a0c51fe803f592eae3f77e845` | `app/analytics.py` | Python, GeoPandas | MIT candidate for v2. | None | Spatial validation and reproducibility require separate fixtures. |
 
-Direct reuse and adapted code are both currently empty. No reuse savings have been measured.
+Original implementations include API authorization, dataset registry, funding, job queue, worker, scheduler, run manifests and React workspace. The exact license text for the extracted code is in [Aging Genomics MIT license](aging-genomics-LICENSE.txt).

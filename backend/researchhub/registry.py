@@ -48,7 +48,7 @@ def upload(connection, storage, project_id, dataset_id, data):
     return version
 
 
-def download(connection, storage, project_id, dataset_id, version):
+def read_version(connection, storage, project_id, dataset_id, version):
     row = connection.execute(select(versions).join(datasets).where(
         datasets.c.project_id == project_id, versions.c.dataset_id == dataset_id,
         versions.c.version == version,
@@ -58,5 +58,29 @@ def download(connection, storage, project_id, dataset_id, version):
     data = storage.read(row["id"])
     if len(data) != row["size"] or checksum(data) != row["checksum"]:
         raise OSError("Dataset integrity check failed")
-    return data
+    return row, data
+
+
+def download(connection, storage, project_id, dataset_id, version):
+    return read_version(connection, storage, project_id, dataset_id, version)[1]
+
+
+def compute_inputs(connection, storage, project_id, dataset_id, version, plugin):
+    row, data = read_version(connection, storage, project_id, dataset_id, version)
+    reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
+    fields = reader.fieldnames or []
+    if plugin == "summary@1" and fields == ["value"]:
+        values = [int(record["value"]) for record in reader]
+        parameters = {"observations": values}
+    elif plugin == "age-association@1" and "age" in fields and len(fields) > 1:
+        expression = {name: [] for name in fields if name != "age"}
+        ages = []
+        for record in reader:
+            ages.append(float(record["age"]))
+            for name in expression:
+                expression[name].append(float(record[name]))
+        parameters = {"ages": ages, "expression": expression}
+    else:
+        raise ValueError("Dataset columns do not match the plugin")
+    return parameters, {"id": dataset_id, "version": row["version"], "sha256": row["checksum"]}
 

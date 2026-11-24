@@ -3,7 +3,9 @@ import json
 import os
 import platform
 import time
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import and_, or_, select, text
@@ -42,7 +44,10 @@ def submit(connection, project_id, key, plugin, parameters, *, max_attempts=3, t
            provenance=None):
     if not 1 <= len(key) <= 128 or not 1 <= max_attempts <= 8 or not 1 <= timeout_ms <= 300_000:
         raise ValueError("Invalid idempotency key or retry settings")
-    body = json.dumps([plugin, parameters, max_attempts, timeout_ms, provenance],
+    inputs = [plugin, parameters, max_attempts, timeout_ms]
+    if provenance is not None:
+        inputs.append(provenance)
+    body = json.dumps(inputs,
                       sort_keys=True, allow_nan=False, separators=(",", ":"))
     fingerprint = hashlib.sha256(body.encode()).hexdigest()
     timestamp = now_ms(connection)
@@ -138,10 +143,20 @@ def manifest(job, result, timestamp):
         "plugin_id": job["plugin"].split("@", 1)[0],
         "plugin_version": job["plugin"].split("@", 1)[-1],
         "inputs": job["parameters"], "dataset": job["provenance"],
-        "code_version": os.getenv("RESEARCHHUB_CODE_VERSION", "unknown"),
+        "code_version": os.getenv("RESEARCHHUB_CODE_VERSION") or source_version(),
         "runtime": runtime, "completed_at_ms": timestamp,
         "output_sha256": hashlib.sha256(payload.encode()).hexdigest(),
     }
+
+
+@lru_cache(maxsize=1)
+def source_version():
+    digest = hashlib.sha256()
+    source = Path(__file__).parent
+    for path in sorted(source.glob("*.py")):
+        digest.update(path.name.encode() + b"\0")
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def cancel(connection, project_id, job_id):

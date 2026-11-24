@@ -1,14 +1,23 @@
 import json
 import multiprocessing
-import socket
 import time
 from uuid import uuid4
 
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.dialects.postgresql import insert
 
 from .db import connect
 from .plugins import PLUGINS
-from .queue import claim, finish, heartbeat, recover
+from .models import workers
+from .queue import claim, finish, heartbeat, now_ms, recover
+
+
+def report_worker(connection, worker):
+    timestamp = now_ms(connection)
+    statement = insert(workers).values(id=worker, last_seen=timestamp)
+    connection.execute(statement.on_conflict_do_update(
+        index_elements=[workers.c.id], set_={"last_seen": timestamp},
+    ))
 
 
 def execute_plugin(sender, plugin, parameters):
@@ -33,6 +42,7 @@ def execute_attempt(engine, job):
         while True:
             if time.monotonic() >= next_heartbeat:
                 with engine.begin() as connection:
+                    report_worker(connection, job["worker"])
                     state = heartbeat(connection, job["id"], job["token"])
                 if state == "LOST":
                     return
@@ -60,10 +70,11 @@ def execute_attempt(engine, job):
 
 def run():
     engine = connect()
-    worker = socket.gethostname()[:60] + "-" + uuid4().hex
+    worker = uuid4().hex
     while True:
         try:
             with engine.begin() as connection:
+                report_worker(connection, worker)
                 recover(connection)
                 job = claim(connection, worker)
             if job is None:

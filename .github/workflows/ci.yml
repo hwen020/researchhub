@@ -1,0 +1,68 @@
+name: ResearchHub CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: researchhub
+          POSTGRES_USER: researchhub
+          POSTGRES_PASSWORD: isolated-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U researchhub"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://researchhub:isolated-ci@localhost/researchhub
+      RESEARCHHUB_TEST_DATABASE: postgresql+psycopg://researchhub:isolated-ci@localhost/researchhub
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m compileall -q researchhub
+      - run: alembic upgrade head && alembic check
+      - run: python -m pytest -q
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run build
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: isolatedci
+      RESEARCHHUB_FIXTURE_PASSWORD: synthetic-ci-fixture-only
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up --build -d --scale worker=2
+      - run: curl --retry 12 --retry-connrefused --retry-delay 2 --fail http://127.0.0.1:8080/api/readyz
+      - run: docker compose exec -T -e RESEARCHHUB_FIXTURE_PASSWORD api python - < scripts/seed_browser_fixture.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci && npx playwright install --with-deps chromium && npm run test:e2e
+        working-directory: frontend
+      - run: docker compose down -v
+        if: always()

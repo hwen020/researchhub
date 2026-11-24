@@ -1,0 +1,3 @@
+# Security model
+
+The workspace uses password verification with salted scrypt and HTTP Basic credentials over loopback for local acceptance. Browser credentials live in application memory. A public deployment requires HTTPS, isolated guest access, rate limits and a separately reviewed deployment profile. Project membership controls access to jobs, datasets, funding and audit. All ID-based job and dataset lookup queries are scoped to the authorized project. Uploads enforce a size cap, CSV type and structural validation. The local adapter derives storage keys from generated UUIDs. Workers execute built-in plugins with no user-supplied programs. Audit records store project, actor, action, subject and timestamp.

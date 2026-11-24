@@ -1,0 +1,3 @@
+# Data consistency
+
+Job effects are authoritative only after the result and manifest commit under a valid attempt token. A recovered plugin invocation may run more than once, so plugins compute pure values. Budget decisions lock the project budget before the request and enforce nonnegative balances in PostgreSQL. Dataset upload locks the dataset before assigning its next version. The database row and filesystem write use different durability mechanisms. A failure after the file write and before commit can leave an unreachable artifact. Dataset downloads verify the stored SHA-256 before serving bytes.
