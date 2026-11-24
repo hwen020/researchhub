@@ -1,0 +1,43 @@
+* { box-sizing: border-box }
+:root { color: #162a2e; background: #f3f6f4; font: 15px/1.5 system-ui, sans-serif }
+body { margin: 0 }
+.shell { display: grid; min-height: 100vh; grid-template-columns: 228px 1fr }
+aside { padding: 30px 18px; background: #122d2d; color: #edf5ef }
+.brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; margin: 0 4px 34px }
+.brand span { background: #b7e6aa; color: #172c27; border-radius: 9px; width: 32px; text-align: center }
+nav { display: grid; gap: 5px }
+nav button { border: 0; text-align: left; background: transparent; color: #c3d4ce }
+nav .selected { background: #2c4944; color: #fff }
+main { width: min(100%, 1200px); padding: 38px clamp(16px, 4vw, 56px) }
+header, .toolbar, .action { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap }
+header { border-bottom: 1px solid #dce5de; padding-bottom: 22px; margin-bottom: 20px }
+.eyebrow { color: #467165; margin: 0; font-size: 13px; font-weight: 650 }
+h1 { margin: 0; font-size: clamp(28px, 4vw, 43px); letter-spacing: -.035em }
+h2 { font-size: 18px }
+.toolbar { margin-bottom: 16px }
+button, select, input { font: inherit; color: inherit; border: 1px solid #d4dfd7; border-radius: 7px; background: #fff; padding: 8px 11px }
+button { cursor: pointer; font-weight: 600 }
+button:hover { border-color: #639a82 }
+.primary { background: #185746; color: #fff; border-color: #185746 }
+.panel { background: #fff; border: 1px solid #dce5de; border-radius: 11px; padding: 18px; margin: 0 0 16px }
+.cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)) }
+.cards strong { display: block; font-size: 32px; margin-top: 5px }
+.sign-in { width: min(100%, 390px); display: grid; gap: 15px }
+.sign-in input { display: block; width: 100%; margin-top: 4px }
+.action { justify-content: flex-start }
+.action input, .toolbar select { margin-left: 8px }
+.badge { background: #e6f2df; color: #30593b; border-radius: 5px; padding: 3px 7px; font-size: 12px; font-weight: 700 }
+.status { color: #85271d }
+.table-wrap, pre { overflow: auto }
+table { width: 100%; border-collapse: collapse; text-align: left }
+td, th { padding: 8px; border-bottom: 1px solid #e7eee8 }
+td button { margin-right: 6px }
+.workflow li span { margin-left: 12px }
+@media (max-width: 680px) {
+  .shell { grid-template-columns: 1fr }
+  aside { padding: 14px }
+  .brand { margin-bottom: 12px }
+  nav { display: flex; overflow: auto }
+  nav button { white-space: nowrap }
+  main { padding-top: 18px }
+}

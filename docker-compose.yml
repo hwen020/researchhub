@@ -1,0 +1,58 @@
+x-backend: &backend
+  build: ./backend
+  environment:
+    DATABASE_URL: postgresql+psycopg://researchhub:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres/researchhub
+    RESEARCHHUB_STORAGE: /artifacts
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: researchhub
+      POSTGRES_USER: researchhub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "researchhub", "-d", "researchhub"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  schema:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+  api:
+    <<: *backend
+    volumes:
+      - artifacts:/artifacts
+    depends_on:
+      schema:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+  worker:
+    <<: *backend
+    command: ["python", "-m", "researchhub.worker"]
+    depends_on:
+      schema:
+        condition: service_completed_successfully
+  scheduler:
+    <<: *backend
+    command: ["python", "-m", "researchhub.scheduler"]
+    depends_on:
+      schema:
+        condition: service_completed_successfully
+  frontend:
+    build: ./frontend
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:8080:80"
+
+volumes:
+  database:
+  artifacts:
+
