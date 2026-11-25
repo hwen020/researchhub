@@ -33,7 +33,7 @@ def check(base_url):
             readiness = json.loads(request("/readyz"))
             if readiness["status"] == "ready":
                 break
-        except (URLError, TimeoutError):
+        except (URLError, TimeoutError, ConnectionResetError):
             pass
         time.sleep(1)
     else:
