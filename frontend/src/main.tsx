@@ -45,6 +45,7 @@ function Workspace() {
   const [discipline, setDiscipline] = useState('genomics')
   const [isDemo, setIsDemo] = useState(false)
   const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [workflowDataset, setWorkflowDataset] = useState('')
   const [selectedDataset, setSelectedDataset] = useState('')
   const [datasetVersions, setDatasetVersions] = useState<DatasetVersion[]>([])
   const [funding, setFunding] = useState<Funding | null>(null)
@@ -161,6 +162,12 @@ function Workspace() {
     setVersions([])
     setSchedules([])
   }, [projectId])
+
+  useEffect(() => {
+    if (datasets.length && !datasets.some((dataset) => dataset.id === workflowDataset)) {
+      setWorkflowDataset(datasets[0].id)
+    }
+  }, [datasets, workflowDataset])
 
   useEffect(() => {
     if (!token || !projectId || section !== 'Notifications' || isDemo) return
@@ -363,7 +370,7 @@ function Workspace() {
               }}>
                 <label>Discipline<select name="discipline" value={discipline} onChange={(event) => setDiscipline(event.target.value)}><option value="genomics">Genomics</option>
                   <option value="mobility">Wearable mobility</option></select></label>
-                <label>Dataset<select name="dataset" required>{datasets.map((dataset) =>
+                <label>Dataset<select name="dataset" required value={workflowDataset} onChange={(event) => setWorkflowDataset(event.target.value)}>{datasets.map((dataset) =>
                   <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label>
                 <label>Dataset version<input name="version" type="number" min="1" defaultValue="1" required /></label>
                 <label>Study timezone<input name="timezone" defaultValue="UTC" required /></label>
