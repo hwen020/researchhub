@@ -130,12 +130,15 @@ test('mobile research workflow publishes artifacts and replays notifications', a
   await page.getByRole('button', { name: 'Workflows', exact: true }).click()
   await page.getByLabel('Discipline').selectOption('mobility')
   await page.getByRole('combobox', { name: 'Dataset', exact: true }).selectOption({ label: datasetName })
+  const requestPromise = page.waitForRequest((request) =>
+    request.method() === 'POST' && request.url().endsWith('/research-workflows'))
   const responsePromise = page.waitForResponse((response) =>
     response.request().method() === 'POST' && response.url().endsWith('/research-workflows'))
   await page.getByRole('button', { name: 'Start research workflow' }).click()
+  const submittedRequest = await requestPromise
   const response = await responsePromise
   if (!response.ok()) {
-    throw new Error(`Research workflow submission failed: HTTP ${response.status()} ${await response.text()}`)
+    throw new Error(`Research workflow submission failed: payload=${JSON.stringify(submittedRequest.postDataJSON())} HTTP ${response.status()} ${await response.text()}`)
   }
   const { id } = await response.json()
   const mobility = page.locator('article[data-run-id="' + id + '"]')
