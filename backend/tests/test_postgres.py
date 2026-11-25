@@ -11,9 +11,10 @@ import unittest
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 from uuid import uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 
 from researchhub.db import connect
@@ -50,7 +51,8 @@ class PostgresIntegration(unittest.TestCase):
             conn.execute(projects.insert().values(id="project", organization_id="org", name="Research"))
             conn.execute(budgets.insert().values(project_id="project", limit=100))
             conn.execute(users.insert(), [
-                {"id": user, "username": user, "password_hash": "fixture"}
+                {"id": user, "username": user, "password_hash": "fixture",
+                 "platform_admin": 0, "must_change_password": 0}
                 for user in ("requester", "reviewer")
             ])
 
@@ -162,8 +164,10 @@ class PostgresIntegration(unittest.TestCase):
         with self.engine.begin() as conn:
             conn.execute(organizations.insert().values(id=organization, name="Admin fixture lab"))
             conn.execute(users.insert(), [
-                {"id": admin_id, "username": "fixture-admin", "password_hash": hash_password(admin_password), "platform_admin": 1},
-                {"id": pi_id, "username": "fixture-pi-admin", "password_hash": hash_password(pi_password), "platform_admin": 0},
+                {"id": admin_id, "username": "fixture-admin", "password_hash": hash_password(admin_password),
+                 "platform_admin": 1, "must_change_password": 0},
+                {"id": pi_id, "username": "fixture-pi-admin", "password_hash": hash_password(pi_password),
+                 "platform_admin": 0, "must_change_password": 0},
             ])
 
         with patch.object(api, "engine", self.engine), TestClient(api.app) as client:
@@ -212,9 +216,12 @@ class PostgresIntegration(unittest.TestCase):
             conn.execute(projects.insert().values(id=project, organization_id=organization, name="PI guard"))
             conn.execute(budgets.insert().values(project_id=project, limit=0, spent=0))
             conn.execute(users.insert(), [
-                {"id": admin_id, "username": "fixture-pi-guard-admin", "password_hash": hash_password(admin_password), "platform_admin": 1},
-                {"id": first_pi, "username": "fixture-first-pi", "password_hash": "fixture"},
-                {"id": second_pi, "username": "fixture-second-pi", "password_hash": "fixture"},
+                {"id": admin_id, "username": "fixture-pi-guard-admin", "password_hash": hash_password(admin_password),
+                 "platform_admin": 1, "must_change_password": 0},
+                {"id": first_pi, "username": "fixture-first-pi", "password_hash": "fixture",
+                 "platform_admin": 0, "must_change_password": 0},
+                {"id": second_pi, "username": "fixture-second-pi", "password_hash": "fixture",
+                 "platform_admin": 0, "must_change_password": 0},
             ])
             conn.execute(memberships.insert(), [
                 {"project_id": project, "user_id": first_pi, "role": "pi"},
@@ -426,11 +433,17 @@ class PostgresIntegration(unittest.TestCase):
         username = "api-restart-user"
         password = "api restart fixture password"
         user_id = str(uuid4())
+        project_id = str(uuid4())
         with self.engine.begin() as conn:
             conn.execute(users.insert().values(
                 id=user_id, username=username, password_hash=hash_password(password),
+                platform_admin=0, must_change_password=0,
             ))
-            conn.execute(memberships.insert().values(project_id="project", user_id=user_id, role="pi"))
+            conn.execute(projects.insert().values(
+                id=project_id, organization_id="org", name="API restart fixture",
+            ))
+            conn.execute(budgets.insert().values(project_id=project_id, limit=1000, spent=0))
+            conn.execute(memberships.insert().values(project_id=project_id, user_id=user_id, role="pi"))
 
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
@@ -447,8 +460,12 @@ class PostgresIntegration(unittest.TestCase):
             if key is not None:
                 headers["Idempotency-Key"] = key
             request_object = urllib.request.Request(base_url + path, data=data, headers=headers, method=method)
-            with urllib.request.urlopen(request_object, timeout=2) as response:
-                return response.status, json.loads(response.read())
+            try:
+                with urllib.request.urlopen(request_object, timeout=2) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                detail = json.loads(exc.read())
+                return exc.code, detail
 
         def wait_until_ready():
             deadline = time.monotonic() + 15
@@ -465,10 +482,10 @@ class PostgresIntegration(unittest.TestCase):
         with patch.dict(os.environ, RESEARCHHUB_STORAGE=tempfile.gettempdir()):
             first = self.launch(*server_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         wait_until_ready()
-        path = "/projects/project/jobs"
+        path = f"/projects/{project_id}/jobs"
         body = {"plugin": "summary@1", "parameters": {"observations": [2, 4, 6]}}
         status, created = request(path, "POST", body, "api-restart-idempotency")
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 200, created)
         first.terminate()
         first.wait(timeout=10)
 
