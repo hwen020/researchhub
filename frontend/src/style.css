@@ -1,14 +1,14 @@
 * { box-sizing: border-box }
 :root { color: #162a2e; background: #f3f6f4; font: 15px/1.5 system-ui, sans-serif }
 body { margin: 0 }
-.shell { display: grid; min-height: 100vh; grid-template-columns: 228px 1fr }
+.shell { display: grid; min-height: 100vh; grid-template-columns: 228px minmax(0, 1fr) }
 aside { padding: 30px 18px; background: #122d2d; color: #edf5ef }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; margin: 0 4px 34px }
 .brand span { background: #b7e6aa; color: #172c27; border-radius: 9px; width: 32px; text-align: center }
 nav { display: grid; gap: 5px }
 nav button { border: 0; text-align: left; background: transparent; color: #c3d4ce }
 nav .selected { background: #2c4944; color: #fff }
-main { width: min(100%, 1200px); padding: 38px clamp(16px, 4vw, 56px) }
+main { min-width: 0; width: min(100%, 1200px); padding: 38px clamp(16px, 4vw, 56px) }
 header, .toolbar, .action { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap }
 header { border-bottom: 1px solid #dce5de; padding-bottom: 22px; margin-bottom: 20px }
 .eyebrow { color: #467165; margin: 0; font-size: 13px; font-weight: 650 }
@@ -34,7 +34,7 @@ td, th { padding: 8px; border-bottom: 1px solid #e7eee8 }
 td button { margin-right: 6px }
 .workflow li span { margin-left: 12px }
 @media (max-width: 680px) {
-  .shell { grid-template-columns: 1fr }
+  .shell { grid-template-columns: minmax(0, 1fr) }
   aside { padding: 14px }
   .brand { margin-bottom: 12px }
   nav { display: flex; overflow: auto }

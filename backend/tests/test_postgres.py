@@ -147,6 +147,19 @@ class PostgresIntegration(unittest.TestCase):
             actions = {entry["action"] for entry in client.get(base + "/audit", auth=owner).json()}
             self.assertEqual(actions, {"dataset_registered", "dataset_uploaded", "job_submission", "job_artifact_download"})
 
+    def test_invalid_basic_auth_returns_json_without_browser_challenge(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from researchhub import api
+
+        with patch.object(api, "engine", self.engine), TestClient(api.app) as client:
+            for credentials in (None, ("unknown", "wrong fixture password"), ("requester", "wrong fixture password")):
+                with self.subTest(has_credentials=credentials is not None):
+                    response = client.get("/projects", auth=credentials)
+                    self.assertEqual(response.status_code, 401)
+                    self.assertEqual(response.json(), {"detail": "Invalid credentials"})
+                    self.assertNotIn("www-authenticate", response.headers)
+
     def launch(self, *args, **kwargs):
         environment = dict(os.environ, DATABASE_URL=self.url.render_as_string(hide_password=False))
         process = subprocess.Popen([sys.executable, "-B", *args], env=environment, **kwargs)

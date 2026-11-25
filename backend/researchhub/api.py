@@ -23,7 +23,7 @@ from .workflows import start
 
 app = FastAPI(title="ResearchHub")
 engine = connect()
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
 dummy_hash = hash_password(uuid4().hex)
 ALL_ROLES = {"pi", "researcher", "finance"}
 COMPUTE_ROLES = {"pi", "researcher"}
@@ -78,10 +78,14 @@ def transaction():
         raise HTTPException(503, "Database unavailable") from exc
 
 
-def authenticate(credentials: HTTPBasicCredentials = Depends(security), connection=Depends(transaction, scope="function")):
-    user = connection.execute(select(users).where(users.c.username == credentials.username[:101])).mappings().one_or_none()
-    if not verify_password(credentials.password, user["password_hash"] if user else dummy_hash) or user is None:
-        raise HTTPException(401, "Invalid credentials", headers={"WWW-Authenticate": "Basic"})
+def authenticate(credentials: HTTPBasicCredentials | None = Depends(security), connection=Depends(transaction, scope="function")):
+    user = None
+    password = "missing credential"
+    if credentials is not None:
+        user = connection.execute(select(users).where(users.c.username == credentials.username[:101])).mappings().one_or_none()
+        password = credentials.password
+    if not verify_password(password, user["password_hash"] if user else dummy_hash) or user is None:
+        raise HTTPException(401, "Invalid credentials")
     return user
 
 
