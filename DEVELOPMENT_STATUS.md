@@ -2,7 +2,7 @@
 
 ## Release decision
 
-Core v1 development and local acceptance are substantially complete. A private independent repository exists at `https://github.com/hwen020/researchhub` and GitHub Actions is rerunning. No official public repository setting, tag, public release, public demo or v2 branch has been created. Public release remains blocked until an actual green CI rerun and project-license confirmation; Render deployment remains blocked until Render account authorization is available.
+Core v1 development and local acceptance are complete. A private independent repository exists at `https://github.com/hwen020/researchhub`; GitHub Actions run `45525441466` is green for backend, frontend and compose. No official public repository setting, tag, public release, public demo or v2 branch has been created. Public release remains blocked until project-license confirmation; Render deployment remains blocked until Render account authorization is available.
 
 ## Verified work
 

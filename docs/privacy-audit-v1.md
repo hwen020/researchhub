@@ -20,5 +20,7 @@
 
 - Private-source audit: PASS for tracked content and reachable commit identities.
 - Private repository publication: permitted after final source audit.
+- Private independent repository: CREATED and pushed at `https://github.com/hwen020/researchhub`; visibility remains private.
+- GitHub Actions: run `45525441466` passed backend, frontend and compose for commit `d32c66c`.
 - Public repository publication: BLOCKED until main-project permission/license is confirmed.
 - GitHub Actions, public tag and Render demo remain separate from this privacy check.
