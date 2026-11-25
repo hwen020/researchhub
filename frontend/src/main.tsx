@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './style.css'
 
@@ -35,6 +35,7 @@ function Workspace() {
   const [pendingAuthorization, setPendingAuthorization] = useState('')
   const [pendingUsername, setPendingUsername] = useState('')
   const [temporaryPassword, setTemporaryPassword] = useState('')
+  const refreshSequence = useRef(0)
   const project = projects.find((item) => item.id === projectId)
 
   async function api<T>(path: string, init?: RequestInit, authorization = token): Promise<T> {
@@ -47,6 +48,7 @@ function Workspace() {
   }
 
   async function refresh() {
+    const refreshId = ++refreshSequence.current
     setStatus('')
     setDetails(null)
     setLoading(true)
@@ -65,7 +67,10 @@ function Workspace() {
       const base = '/projects/' + projectId
       if (section === 'Overview' || section === 'Jobs') setJobs(await api<Job[]>(base + '/jobs'))
       if (section === 'Overview' || section === 'Workflows') setWorkflows(await api<Workflow[]>(base + '/workflows'))
-      if (section === 'Datasets') setDatasets(await api<Dataset[]>(base + '/datasets'))
+      if (section === 'Datasets') {
+        const currentDatasets = await api<Dataset[]>(base + '/datasets')
+        if (refreshId === refreshSequence.current) setDatasets(currentDatasets)
+      }
       if (section === 'Funding') setFunding(await api<Funding>(base + '/funding'))
       if (section === 'Members') {
         const currentMembers = await api<Member[]>(base + '/members')
@@ -74,9 +79,9 @@ function Workspace() {
       }
       if (section === 'Audit') setDetails(await api(base + '/audit'))
     } catch (error) {
-      setStatus(String(error))
+      if (refreshId === refreshSequence.current) setStatus(String(error))
     } finally {
-      setLoading(false)
+      if (refreshId === refreshSequence.current) setLoading(false)
     }
   }
 

@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose up --build -d --scale worker=2
-      - run: curl --retry 12 --retry-connrefused --retry-delay 2 --fail http://127.0.0.1:8080/api/readyz
+      - run: curl --retry 12 --retry-all-errors --retry-delay 2 --fail http://127.0.0.1:8080/api/readyz
       - run: docker compose exec -T -e RESEARCHHUB_FIXTURE_PASSWORD api python - < scripts/seed_browser_fixture.py
       - uses: actions/setup-node@v4
         with:
