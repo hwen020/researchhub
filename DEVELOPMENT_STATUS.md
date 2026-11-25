@@ -1,5 +1,34 @@
 # ResearchHub development handoff
 
+## Safe pause and release handoff
+
+Development is paused on `feature/researchhub-v2`. The code and test candidate is `6fd8d765c8647d2ea8215f718b2427c3ecc2ab36`, verified on the remote branch before this documentation-only handoff. [GitHub Actions run 45547622128](https://github.com/hwen020/researchhub/actions/runs/45547622128) was **PENDING** (`in_progress`) when recorded. The handoff commit skips CI and leaves the candidate code and workflows intact.
+
+- Local acceptance recorded 36 passing backend tests using PostgreSQL and VersityGW, and three passing 390 px Edge tests against the isolated two-Worker Compose stack at Alembic head `0012`.
+- PostgreSQL stop/start returned HTTP 503 during the outage and 200 after restart. The same idempotency key replayed the retained job, which completed with mean 4. The VersityGW process restart recovered a pending intent and verified the exact staged bytes.
+- The complete measurements and methodology are in [benchmarks-v2.md](docs/benchmarks-v2.md). For 1/2/4 Workers, single-project throughput was 1.42/2.50/4.41 jobs/s, and mixed throughput was 1.17/2.33/2.95 jobs/s. Mixed first-half Jain index was 0.960 in all three runs.
+- Prometheus configuration parsed successfully. The optional metrics endpoint returned parseable data, and promtool lint flagged missing HELP text. Grafana runtime qualification remains open.
+- The existing [v1.0.0 release](https://github.com/hwen020/researchhub/releases/tag/v1.0.0) and [public Demo](https://researchhub-demo.onrender.com) remain in place. The latest public readiness probe returned HTTP 200. Render CLI and an authorized Render API connection were unavailable. The service branch, automatic deploy, Blueprint sync and Free PostgreSQL state require authenticated verification.
+
+### Resume at the release gates
+
+1. Fetch the remote branch and inspect its head and the exact candidate CI run.
+
+   ```sh
+   git fetch origin feature/researchhub-v2
+   git log -2 --oneline origin/feature/researchhub-v2
+   gh run view 45547622128 --repo hwen020/researchhub --json headSha,status,conclusion,jobs
+   ```
+
+   If GitHub CLI is unavailable, open the run link above or query the [GitHub REST run endpoint](https://api.github.com/repos/hwen020/researchhub/actions/runs/45547622128). Verify backend, frontend, Compose and the fixed Genomics demo image step for the candidate SHA. Investigate failures before advancing.
+2. In the authorized Render dashboard, open the existing ResearchHub Demo service and its Blueprint. Check the connected branch, service auto-deploy, Blueprint auto-sync and the Free database state. Use the [deployment runbook](docs/deployment-v2.md) and [acceptance matrix](docs/v2-acceptance-matrix.md) to close publication gates.
+3. After the gates pass, merge the accepted branch to main, verify main CI, publish the v2.0.0 tag and release, and deploy the accepted commit to the existing Render service. Preserve the original v1.0.0 tag and release. Verify readiness, guest restrictions, dataset provenance, all Genomics DAG stages and exports with the following command using the synthetic Demo password supplied through the environment.
+
+   ```sh
+   python scripts/check_demo_profile.py https://researchhub-demo.onrender.com
+   ```
+
+
 ## v2 development
 
 Independent branch `feature/researchhub-v2` begins at the published v1 documentation commit `b7afbbe`. The current checkpoint covers resource scheduling, advanced workflow lifecycle and two dataset-backed scientific pipelines. The fixed demo profile passed local authorization and genomics execution checks. The live deployment was inspected through readiness only.
