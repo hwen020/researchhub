@@ -42,6 +42,7 @@ function Workspace() {
   const [versions, setVersions] = useState<WorkflowVersion[]>([])
   const [scheduleVersion, setScheduleVersion] = useState('')
   const [schedules, setSchedules] = useState<Schedule[]>([])
+  const [discipline, setDiscipline] = useState('genomics')
   const [isDemo, setIsDemo] = useState(false)
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [selectedDataset, setSelectedDataset] = useState('')
@@ -360,7 +361,7 @@ function Workspace() {
                   await refresh()
                 })
               }}>
-                <label>Discipline<select name="discipline"><option value="genomics">Genomics</option>
+                <label>Discipline<select name="discipline" value={discipline} onChange={(event) => setDiscipline(event.target.value)}><option value="genomics">Genomics</option>
                   <option value="mobility">Wearable mobility</option></select></label>
                 <label>Dataset<select name="dataset" required>{datasets.map((dataset) =>
                   <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label>
@@ -684,4 +685,3 @@ function Workspace() {
 }
 
 createRoot(document.getElementById('root')!).render(<Workspace />)
-
