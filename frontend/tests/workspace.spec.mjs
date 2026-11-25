@@ -122,7 +122,8 @@ test('mobile research workflow publishes artifacts and replays notifications', a
     name: 'synthetic.csv', mimeType: 'text/csv',
     buffer: Buffer.from('participant_id,timestamp_utc,latitude,longitude,steps\n' +
       'synthetic01,2025-01-01T00:00:00Z,0,0,10\n' +
-      'synthetic01,2025-01-01T00:10:00Z,0.001,0,20\n'),
+      'synthetic01,2025-01-01T00:10:00Z,0.001,0,20\n' +
+      'synthetic01,2025-01-01T00:11:00Z,2,0,30\n'),
   })
   await page.getByRole('button', { name: 'Upload new version' }).click()
   await expect(page.getByRole('button', { name: 'Download dataset' })).toBeVisible()
