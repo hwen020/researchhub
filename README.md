@@ -20,6 +20,10 @@ Export a new bootstrap username and password in the invoking shell before runnin
 - [Security](docs/security-model.md), [reproducibility](docs/research-reproducibility.md) and [source provenance](docs/reuse-matrix.md)
 - [Acceptance report](docs/test-report-v1.md) and [measured benchmark](docs/benchmarks.md)
 
+## Release verification status
+
+The current 390px Edge browser suite passes 2 tests, the frontend production build passes, migration metadata is clean through the current head, and the dedicated PostgreSQL backend suite passes 25 tests. Public GitHub release and public demo deployment remain separate gates until repository privacy, license and CI approval are complete.
+
 ## Tests
 
 From `backend`, install `requirements-dev.txt`. Set `DATABASE_URL` and `RESEARCHHUB_TEST_DATABASE` to a disposable PostgreSQL database and run `alembic upgrade head`, `alembic check` and `python -m pytest -q`. From `frontend`, run `npm ci` and `npm run build`. Browser smoke tests use Playwright against an isolated Compose stack with synthetic fixture accounts.
