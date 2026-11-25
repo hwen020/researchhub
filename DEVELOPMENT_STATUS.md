@@ -2,7 +2,7 @@
 
 ## Release decision
 
-Core v1 development and local acceptance are complete. A private independent repository exists at `https://github.com/hwen020/researchhub`; GitHub Actions run `45525441466` is green for backend, frontend and compose. The owner-authorized MIT License and third-party notices are now included. Public repository publication, tag/release and public demo deployment remain the final external gates; Render remains blocked until Render account authorization is available.
+Core v1 development and local acceptance are complete. The independent public repository is `https://github.com/hwen020/researchhub`; GitHub Actions run `45529021806` is green for backend, frontend and compose at license commit `63532a9`. The owner-authorized MIT License and third-party notices are included. Tag `v1.0.0` and GitHub Release are published. Public Demo deployment remains blocked until Render account authorization is available.
 
 ## Verified work
 

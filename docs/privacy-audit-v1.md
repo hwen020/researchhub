@@ -23,5 +23,6 @@
 - Private independent repository: CREATED and pushed at `https://github.com/hwen020/researchhub`; visibility remains private.
 - GitHub Actions: run `45525441466` passed backend, frontend and compose for commit `d32c66c`.
 - Main-project license: PASS. The owner-authorized MIT License is now at `LICENSE` and does not relicense third-party work.
-- Public repository publication: READY after final repository/settings verification.
+- Public repository publication: PASS. Repository is public at `https://github.com/hwen020/researchhub`.
+- Release: PASS. Annotated tag `v1.0.0` and GitHub Release are published.
 - GitHub Actions, public tag and Render demo remain separate from this privacy check.
