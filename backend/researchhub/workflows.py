@@ -1,11 +1,16 @@
 import hashlib
 import json
+import os
 from collections import deque
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .models import jobs, workflow_runs
+from .models import jobs, workflow_definitions, workflow_runs, workflow_versions
+from .notifications import enqueue as notify
+from .observability import correlation_id, emit
 from .queue import TERMINAL, cancel, now_ms, submit
 from .resource_policy import QueueFull
 
@@ -57,9 +62,37 @@ def validate(nodes):
     return ordered
 
 
+def snapshot_version(connection, project_id, definition, digest):
+    insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+    connection.execute(insert(workflow_definitions).values(
+        id=str(uuid4()), project_id=project_id, name="Run snapshots", system_kind="snapshot",
+    ).on_conflict_do_nothing(index_elements=[workflow_definitions.c.project_id,
+                                            workflow_definitions.c.system_kind]))
+    template = connection.execute(select(workflow_definitions.c.id).where(
+        workflow_definitions.c.project_id == project_id, workflow_definitions.c.system_kind == "snapshot",
+    ).with_for_update()).scalar_one()
+    existing = connection.execute(select(workflow_versions.c.id).where(
+        workflow_versions.c.definition_id == template, workflow_versions.c.checksum == digest,
+    )).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    number = connection.execute(select(func.max(workflow_versions.c.version)).where(
+        workflow_versions.c.definition_id == template,
+    )).scalar_one()
+    version_id = str(uuid4())
+    connection.execute(workflow_versions.insert().values(
+        id=version_id, definition_id=template, version=(number or 0) + 1,
+        definition=definition, defaults={}, checksum=digest,
+    ))
+    return version_id
+
+
 def start(connection, project_id, definition, *, version_id=None, parameters=None, parent_id=None,
           preserved=None):
     order = validate(definition)
+    digest = definition_checksum(definition)
+    if version_id is None:
+        version_id = snapshot_version(connection, project_id, definition, digest)
     run_id = str(uuid4())
     nodes = {name: {"state": "WAITING"} for name in order}
     if preserved:
@@ -67,7 +100,8 @@ def start(connection, project_id, definition, *, version_id=None, parameters=Non
     connection.execute(workflow_runs.insert().values(
         id=run_id, project_id=project_id, definition=definition, node_order=order,
         nodes=nodes, state="RUNNING", version_id=version_id, parent_id=parent_id,
-        parameters=parameters, definition_checksum=definition_checksum(definition),
+        parameters=parameters, definition_checksum=digest,
+        correlation_id=correlation_id(), created_at=now_ms(connection),
     ))
     return run_id
 
@@ -94,7 +128,10 @@ def cancel_run(connection, project_id, run_id):
     state = "CANCELLED" if all(node["state"] in NODE_TERMINAL for node in nodes.values()) else "CANCEL_REQUESTED"
     connection.execute(workflow_runs.update().where(workflow_runs.c.id == run_id).values(
         state=state, nodes=nodes, checked_at=now_ms(connection),
+        completed_at=now_ms(connection) if state == "CANCELLED" else None,
     ))
+    if state == "CANCELLED":
+        notify_settled(connection, run, state, now_ms(connection))
     return state
 
 
@@ -139,6 +176,13 @@ def dependency_state(spec, nodes, results):
     return "SKIPPED" if "SKIPPED" in upstream else "READY"
 
 
+def notify_settled(connection, run, state, timestamp):
+    emit("workflow_settled", correlation_id=run["correlation_id"], workflow_run_id=run["id"], state=state)
+    if os.getenv("RESEARCHHUB_DEMO_MODE") != "1":
+        notify(connection, run["project_id"], "WORKFLOW_COMPLETED", run["id"],
+               "Workflow " + state.lower(), timestamp, run["correlation_id"])
+
+
 def reconcile(connection, *, project_id=None):
     query = select(workflow_runs).where(workflow_runs.c.state.in_(("RUNNING", "CANCEL_REQUESTED")))
     if project_id is not None:
@@ -176,13 +220,16 @@ def reconcile(connection, *, project_id=None):
                         continue
                     parent_job_id = upstream["job_id"]
                     parameters = results[parent_job_id]
-                    provenance = dict(provenance or {}, upstream={
-                        "job_id": parent_job_id, "sha256": manifests[parent_job_id]["output_sha256"],
-                    })
+                    parent_manifest = manifests[parent_job_id]
+                    upstream_artifact = {"job_id": parent_job_id, "sha256": parent_manifest["output_sha256"]}
+                    if parent_manifest.get("output_artifact_id"):
+                        upstream_artifact["artifact_id"] = parent_manifest["output_artifact_id"]
+                    provenance = dict(provenance or {}, upstream=upstream_artifact)
                 try:
                     job = submit(
                         connection, run["project_id"], "dag:" + run["id"] + ":" + name,
                         spec["plugin"], parameters, provenance=provenance,
+                        trace_id=run["correlation_id"], workflow_run_id=run["id"],
                     )
                 except QueueFull:
                     continue
@@ -196,8 +243,12 @@ def reconcile(connection, *, project_id=None):
                 state = "CANCELLED"
             else:
                 state = "SUCCEEDED" if states <= {"SUCCEEDED", "SKIPPED"} else "FAILED"
+        timestamp = now_ms(connection)
         connection.execute(workflow_runs.update().where(workflow_runs.c.id == run["id"]).values(
-            nodes=nodes, state=state, checked_at=now_ms(connection),
+            nodes=nodes, state=state, checked_at=timestamp,
+            completed_at=timestamp if state in RUN_TERMINAL else None,
         ))
+        if state in RUN_TERMINAL:
+            notify_settled(connection, run, state, timestamp)
     return len(runs)
 

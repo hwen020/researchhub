@@ -8,6 +8,10 @@ if [ -n "${DATABASE_URL:-}" ]; then
     esac
 fi
 
+if [ -n "${RENDER_GIT_COMMIT:-}" ]; then
+    export RESEARCHHUB_CODE_VERSION="$RENDER_GIT_COMMIT"
+fi
+
 alembic upgrade head
 
 export RESEARCHHUB_DEMO_MODE=1
@@ -16,7 +20,7 @@ export RESEARCHHUB_STORAGE="${RESEARCHHUB_STORAGE:-/tmp/researchhub-artifacts}"
 python -m researchhub.demo_fixture
 
 nginx
-python -m uvicorn researchhub.api:app --host 127.0.0.1 --port 8000 &
+python -m uvicorn researchhub.api:app --host 127.0.0.1 --port 8000 --no-access-log &
 api_pid=$!
 python -m researchhub.worker &
 worker_pid=$!

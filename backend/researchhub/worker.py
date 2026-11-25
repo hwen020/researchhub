@@ -1,5 +1,3 @@
-import json
-import multiprocessing
 import os
 import time
 from uuid import uuid4
@@ -9,8 +7,9 @@ from sqlalchemy.dialects.postgresql import insert
 
 from .db import connect
 from .demo_fixture import demo_project
-from .plugins import PLUGINS
+from .execution import LocalExecutionBackend
 from .models import workers
+from .observability import emit
 from .queue import claim, finish, heartbeat, now_ms, recover
 from .resource_policy import CAPABILITIES
 
@@ -32,29 +31,25 @@ def report_worker(connection, worker, resources):
     ))
 
 
-def execute_plugin(sender, plugin, parameters):
+def execute_attempt(engine, job, backend):
     try:
-        outcome = {"result": PLUGINS[plugin](parameters)}
-    except (KeyError, ValueError):
-        outcome = {"error": "invalid_plugin_input"}
-    except Exception:
-        outcome = {"error": "plugin_failure", "retryable": True}
-    with sender:
-        sender.send(outcome)
-
-
-def execute_attempt(engine, job, resources):
-    context = multiprocessing.get_context("spawn")
-    receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(target=execute_plugin, args=(sender, job["plugin"], job["parameters"]))
-    process.start()
-    sender.close()
+        handle = backend.submit(job)
+    except ValueError:
+        with engine.begin() as connection:
+            finish(connection, job["id"], job["token"], error="invalid_execution_backend")
+        return
+    except OSError:
+        with engine.begin() as connection:
+            finish(connection, job["id"], job["token"], error="executor_unavailable", retryable=True)
+        return
+    emit("attempt_started", correlation_id=job["correlation_id"], job_id=job["id"],
+         workflow_run_id=job["workflow_run_id"], attempt=job["attempt"])
     next_heartbeat = 0
     try:
         while True:
             if time.monotonic() >= next_heartbeat:
                 with engine.begin() as connection:
-                    report_worker(connection, job["worker"], resources)
+                    report_worker(connection, job["worker"], backend.capabilities())
                     state = heartbeat(connection, job["id"], job["token"])
                 if state == "LOST":
                     return
@@ -62,28 +57,24 @@ def execute_attempt(engine, job, resources):
                     outcome = {}
                     break
                 next_heartbeat = time.monotonic() + 0.5
-            if receiver.poll(0.1):
-                try:
-                    outcome = receiver.recv()
-                except EOFError:
-                    outcome = {"error": "executor_exited", "retryable": True}
+            outcome = backend.poll(handle, 0.1)
+            if outcome is not None:
                 break
         with engine.begin() as connection:
             committed = finish(connection, job["id"], job["token"], **outcome)
-        print(json.dumps({"event": "attempt_finished", "job_id": job["id"],
-                          "attempt": job["attempt"], "committed": committed}), flush=True)
+        emit("attempt_finished", correlation_id=job["correlation_id"], job_id=job["id"],
+             workflow_run_id=job["workflow_run_id"], attempt=job["attempt"], committed=committed)
     finally:
-        receiver.close()
-        if process.is_alive():
-            process.kill()
-        process.join()
-        process.close()
+        backend.cancel(handle)
 
 
 def run():
     engine = connect()
     worker = uuid4().hex
-    resources = worker_resources()
+    backend = LocalExecutionBackend(worker_resources())
+    resources = backend.capabilities()
+    if not backend.health()["ready"]:
+        raise RuntimeError("Local execution backend is unavailable")
     project_id = demo_project()
     while True:
         try:
@@ -94,9 +85,9 @@ def run():
             if job is None:
                 time.sleep(0.25)
             else:
-                execute_attempt(engine, job, resources)
+                execute_attempt(engine, job, backend)
         except OperationalError:
-            print(json.dumps({"event": "database_unavailable", "worker": worker}), flush=True)
+            emit("database_unavailable", worker=worker)
             time.sleep(1)
 
 

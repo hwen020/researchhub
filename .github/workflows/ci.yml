@@ -70,6 +70,7 @@ jobs:
   compose:
     runs-on: ubuntu-24.04
     env:
+      COMPOSE_PROJECT_NAME: researchhub-ci
       POSTGRES_PASSWORD: isolatedci
       RESEARCHHUB_FIXTURE_PASSWORD: synthetic-ci-fixture-only
     steps:
@@ -82,5 +83,16 @@ jobs:
           node-version: '22'
       - run: npm ci && npx playwright install --with-deps chromium && npm run test:e2e
         working-directory: frontend
+      - name: Fixed Genomics demo image
+        env:
+          RESEARCHHUB_DEMO_PASSWORD: synthetic-ci-demo-only
+        run: |
+          docker build -f demo/Dockerfile -t researchhub-ci-demo .
+          docker compose exec -T postgres createdb -U researchhub demo_ci
+          docker run --rm -d --name researchhub-ci-demo-web --network researchhub-ci_default \
+            -p 127.0.0.1:18080:10000 -e RESEARCHHUB_DEMO_PASSWORD \
+            -e DATABASE_URL=postgresql+psycopg://researchhub:isolatedci@postgres/demo_ci researchhub-ci-demo
+          trap 'docker stop researchhub-ci-demo-web' EXIT
+          python3 scripts/check_demo_profile.py http://127.0.0.1:18080
       - run: docker compose down -v
         if: always()

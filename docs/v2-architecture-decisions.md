@@ -10,6 +10,6 @@ Use a fixed synthetic genomics DAG and a read-only guest. The guest can inspect 
 
 ## Release isolation
 
-Development is local on `feature/researchhub-v2`. Main and the v1 tag are release references. The checked-in Blueprint omits service branch and auto-deploy overrides. Render follows its linked branch and independently configures Blueprint auto-sync. Verify both in the authenticated dashboard before deploying.
+Development is local on `feature/researchhub-v2`. Main and the v1 tag are release references. The v2 candidate explicitly links the service to main and disables commit-triggered service deploys. Blueprint auto-sync remains an independent Render setting. Verify the existing service and Blueprint in the authenticated dashboard before deploying.
 
 [Render Blueprint specification](https://render.com/docs/blueprint-spec)

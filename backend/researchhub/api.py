@@ -8,10 +8,11 @@ import os
 import secrets
 import threading
 from collections import Counter, deque
+from pathlib import Path
 from typing import Dict, List, Literal
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,6 +34,8 @@ from .resource_policy import (
     ACTIVE, READY, QUOTA_FIELDS, QueueFull, online_workers, project_usage,
     scheduling_lock, system_limit, wait_reason,
 )
+from . import notifications as project_notifications
+from .observability import emit, prometheus_text, request_id, runtime_snapshot
 from .registry import MAX_UPLOAD, compute_inputs, download, register, stage_upload
 from .research_workflows import start_research
 from .storage import LocalStorage, managed_storage
@@ -73,16 +76,19 @@ class RequestMetricsMiddleware:
         self.application = application
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("path") == "/metrics":
+        if scope["type"] != "http" or scope.get("path") in {"/metrics", "/metrics/prometheus"}:
             await self.application(scope, receive, send)
             return
         started = time.perf_counter()
         status_code = 500
+        trace_id = str(uuid4())
+        trace_token = request_id.set(trace_id)
 
         async def record_response(message):
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]
+                message.setdefault("headers", []).append((b"x-request-id", trace_id.encode()))
             await send(message)
 
         try:
@@ -92,6 +98,11 @@ class RequestMetricsMiddleware:
             with _http_metrics_lock:
                 _http_duration_samples.append(elapsed_ms)
                 _http_status_classes[f"{status_code // 100}xx"] += 1
+            request_id.reset(trace_token)
+            if scope.get("path") not in {"/healthz", "/readyz"}:
+                emit("http_request", correlation_id=trace_id, method=scope["method"],
+                     route=getattr(scope.get("route"), "path", None), status=status_code,
+                     duration_ms=round(elapsed_ms, 2))
 
 
 app.add_middleware(RequestMetricsMiddleware)
@@ -191,6 +202,14 @@ def prepare_workflow(connection, project, nodes, *, template=False):
             spec["parameters"] = validate_parameters(node.plugin, spec["parameters"])
         definition[name] = spec
     return definition
+
+
+class NotificationReadInput(RequestModel):
+    read: bool
+
+
+class AnnouncementInput(RequestModel):
+    message: str = Field(min_length=1, max_length=500)
 
 
 class FundingInput(RequestModel):
@@ -632,7 +651,8 @@ def metrics(user=Depends(authenticate), connection=Depends(transaction, scope="f
     retries = connection.execute(select(func.count()).select_from(events).where(
         events.c.state == "RETRYING",
     )).scalar_one()
-    queue_wait, execution = job_event_metrics(connection, now_ms(connection))
+    timestamp = now_ms(connection)
+    queue_wait, execution = job_event_metrics(connection, timestamp)
     with _http_metrics_lock:
         http_durations = list(_http_duration_samples)
         http_status_classes = dict(_http_status_classes)
@@ -643,12 +663,26 @@ def metrics(user=Depends(authenticate), connection=Depends(transaction, scope="f
             "job_queue_wait_ms": queue_wait,
             "job_execution_ms": execution,
             "job_metrics_window": {"hours": 24, "max_events": METRICS_EVENT_LIMIT},
+            **runtime_snapshot(connection, timestamp, distribution),
             "http_requests": {
                 "status_classes": http_status_classes,
                 "duration_ms": distribution(http_durations),
                 "sample_limit": HTTP_METRICS_SAMPLE_LIMIT,
                 "scope": "per API process; last 5000 completed requests",
             }}
+
+
+@app.get("/metrics/prometheus")
+def prometheus_metrics(request: Request, credentials: HTTPBasicCredentials | None = Depends(security),
+                       connection=Depends(transaction, scope="function")):
+    token_path = os.getenv("RESEARCHHUB_METRICS_TOKEN_FILE")
+    supplied = request.headers.get("authorization", "").encode("utf-8")
+    token = Path(token_path).read_bytes().strip() if token_path else b""
+    if token and hmac.compare_digest(supplied, b"Bearer " + token):
+        user = {"platform_admin": True}
+    else:
+        user = authenticate(request, credentials, connection)
+    return Response(prometheus_text(metrics(user, connection)), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/projects")
@@ -802,7 +836,8 @@ def list_workflows(project_id: UUID, user=Depends(authenticate), connection=Depe
         workflow_runs.c.project_id == project,
     ).order_by(workflow_runs.c.checked_at.desc(), workflow_runs.c.id).limit(100)
     return [{**{key: value for key, value in row.items() if key != "definition"},
-             "dependencies": {name: spec["depends_on"] for name, spec in row["definition"].items()}}
+             "dependencies": {name: spec["depends_on"] for name, spec in row["definition"].items()},
+             "conditions": {name: spec["when"] for name, spec in row["definition"].items() if spec.get("when")}}
             for row in connection.execute(query).mappings()]
 
 
@@ -827,7 +862,8 @@ def run_research_workflow(project_id: UUID, body: ResearchWorkflowInput, user=De
 def list_templates(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
     authorize(connection, user, project, ALL_ROLES)
-    query = select(workflow_definitions).where(workflow_definitions.c.project_id == project)
+    query = select(workflow_definitions).where(workflow_definitions.c.project_id == project,
+                                                workflow_definitions.c.system_kind.is_(None))
     return [dict(row) for row in connection.execute(query.order_by(workflow_definitions.c.name,
                                                                   workflow_definitions.c.id)).mappings()]
 
@@ -839,6 +875,7 @@ def list_workflow_versions(project_id: UUID, template_id: UUID, user=Depends(aut
     authorize(connection, user, project, ALL_ROLES)
     query = select(workflow_versions).join(workflow_definitions).where(
         workflow_definitions.c.project_id == project, workflow_definitions.c.id == str(template_id),
+        workflow_definitions.c.system_kind.is_(None),
     ).order_by(workflow_versions.c.version.desc())
     return [dict(row) for row in connection.execute(query).mappings()]
 
@@ -908,6 +945,20 @@ def schedule_workflow(project_id: UUID, version_id: UUID, body: WorkflowSchedule
     return schedule
 
 
+@app.delete("/projects/{project_id}/workflow-schedules/{schedule_id}")
+def stop_schedule(project_id: UUID, schedule_id: UUID, user=Depends(authenticate),
+                  connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    updated = connection.execute(workflow_schedules.update().where(
+        workflow_schedules.c.project_id == project, workflow_schedules.c.id == str(schedule_id),
+    ).values(next_at=None))
+    if not updated.rowcount:
+        raise HTTPException(404, "Workflow schedule not found")
+    log_action(connection, user, project, "workflow_schedule_stopped", str(schedule_id))
+    return {"status": "stopped"}
+
+
 @app.post("/projects/{project_id}/workflows/{run_id}/cancel")
 def cancel_workflow(project_id: UUID, run_id: UUID, user=Depends(authenticate),
                     connection=Depends(transaction, scope="function")):
@@ -960,6 +1011,52 @@ def compare_workflow_runs(project_id: UUID, run_id: UUID, other_id: UUID, user=D
         raise HTTPException(404, str(exc)) from exc
 
 
+def can_review_funding(connection, user_id, project):
+    try:
+        require_project(connection, user_id, project, {"pi", "finance"})
+    except PermissionError:
+        return False
+    return True
+
+
+@app.get("/projects/{project_id}/notifications")
+def notifications_feed(project_id: UUID, after: int = Query(0, ge=0, le=2**63 - 1),
+                       limit: int = Query(100, ge=1, le=100),
+                       user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    can_review = can_review_funding(connection, user["id"], project)
+    items = project_notifications.feed(connection, project, user["id"], after, limit, can_review)
+    return {"items": items, "cursor": items[-1]["sequence"] if items else after}
+
+
+@app.put("/projects/{project_id}/notifications/{notification_id}/read")
+def mark_notification(project_id: UUID, notification_id: UUID, body: NotificationReadInput,
+                      user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    try:
+        return project_notifications.mark(connection, project, user["id"], str(notification_id), body.read,
+                                          now_ms(connection), can_review_funding(connection, user["id"], project))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/projects/{project_id}/notifications/announcements")
+def announce(project_id: UUID, body: AnnouncementInput, user=Depends(authenticate),
+             connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, {"pi"})
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(422, "Announcement message is required")
+    enforce_rate_limit("project_announcement", user["id"], 30, API_RATE_WINDOW_MS)
+    subject = str(uuid4())
+    project_notifications.enqueue(connection, project, "ANNOUNCEMENT", subject, message, now_ms(connection))
+    log_action(connection, user, project, "project_announcement", subject)
+    return {"id": subject}
+
+
 @app.get("/projects/{project_id}/funding")
 def funding(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
@@ -985,6 +1082,8 @@ def submit_funding(project_id: UUID, body: FundingInput,
     try:
         request_id = request_funds(connection, project, user["id"], key, body.amount, body.purpose)
         log_action(connection, user, project, "funding_requested", request_id)
+        project_notifications.enqueue(connection, project, "APPROVAL_REQUESTED", request_id,
+                                      "A funding request needs review", now_ms(connection))
         return {"id": request_id}
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -998,6 +1097,8 @@ def review_funding(project_id: UUID, request_id: UUID, body: DecisionInput,
     try:
         state = decide(connection, project, str(request_id), user["id"], body.approve)
         log_action(connection, user, project, "funding_reviewed", str(request_id))
+        project_notifications.enqueue(connection, project, "APPROVAL_DECIDED", str(request_id),
+                                      "Funding request " + state.lower(), now_ms(connection))
         return {"state": state}
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc

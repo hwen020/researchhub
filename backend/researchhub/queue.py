@@ -14,6 +14,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .artifacts import StorageQuotaExceeded, enqueue
 from .models import events, jobs
+from .notifications import enqueue as notify
+from .observability import correlation_id, emit
 from .resource_policy import ACTIVE, READY, admit, candidate, dispatch_project, requirements, scheduling_lock
 
 
@@ -41,7 +43,8 @@ def record(connection, job, state, reason, timestamp):
 
 
 def submit(connection, project_id, key, plugin, parameters, *, max_attempts=3, timeout_ms=30_000,
-           provenance=None, capability=None, cpu_units=1, memory_units=1, priority=0):
+           provenance=None, capability=None, cpu_units=1, memory_units=1, priority=0,
+           trace_id=None, workflow_run_id=None):
     if not 1 <= len(key) <= 128 or not 1 <= max_attempts <= 8 or not 1 <= timeout_ms <= 300_000:
         raise ValueError("Invalid idempotency key or retry settings")
     resources = requirements(plugin, capability, cpu_units, memory_units, priority)
@@ -69,7 +72,8 @@ def submit(connection, project_id, key, plugin, parameters, *, max_attempts=3, t
             id=str(uuid4()), project_id=project_id, idempotency_key=key,
             fingerprint=fingerprint, plugin=plugin, parameters=parameters, provenance=provenance,
             state="QUEUED", max_attempts=max_attempts, timeout_ms=timeout_ms,
-            created_at=timestamp, available_at=timestamp, **resources,
+            created_at=timestamp, available_at=timestamp, correlation_id=correlation_id(trace_id),
+            workflow_run_id=workflow_run_id, **resources,
         ).on_conflict_do_nothing(
             index_elements=[jobs.c.project_id, jobs.c.idempotency_key]
         )
@@ -79,6 +83,8 @@ def submit(connection, project_id, key, plugin, parameters, *, max_attempts=3, t
     )).mappings().one()
     if inserted:
         record(connection, existing, "QUEUED", "submitted", timestamp)
+        emit("job_enqueued", correlation_id=existing["correlation_id"], job_id=existing["id"],
+             workflow_run_id=workflow_run_id)
     if existing["fingerprint"] != fingerprint:
         raise IdempotencyConflict("Idempotency key already used with different inputs")
     return existing
@@ -150,15 +156,21 @@ def manifest(job, result, timestamp):
                 runtime[dependency] = version(dependency)
             except PackageNotFoundError:
                 runtime[dependency] = "unknown"
-    return {
+    provenance = job["provenance"]
+    result_manifest = {
         "job_id": job["id"], "attempt": job["attempt"],
+        "correlation_id": job["correlation_id"], "workflow_run_id": job["workflow_run_id"],
         "plugin_id": job["plugin"].split("@", 1)[0],
         "plugin_version": job["plugin"].split("@", 1)[-1],
-        "inputs": job["parameters"], "dataset": job["provenance"],
+        "inputs": job["parameters"],
+        "dataset": {key: value for key, value in provenance.items() if key != "artifact_id"} if provenance else provenance,
         "code_version": os.getenv("RESEARCHHUB_CODE_VERSION") or source_version(),
         "runtime": runtime, "completed_at_ms": timestamp,
         "output_sha256": hashlib.sha256(payload).hexdigest(),
     }
+    if provenance and provenance.get("artifact_id"):
+        result_manifest["input_artifact_id"] = provenance["artifact_id"]
+    return result_manifest
 
 
 def encode_result(result):
@@ -193,6 +205,9 @@ def fail(connection, job, reason, timestamp, retryable):
         record(connection, job, "FAILED", reason, timestamp)
         reason = "dead_letter"
     transition(connection, job, state, reason, timestamp)
+    if state == "FAILED" and os.getenv("RESEARCHHUB_DEMO_MODE") != "1":
+        notify(connection, job["project_id"], "JOB_FAILED", job["id"], "A research job failed",
+               timestamp, job["correlation_id"])
 
 
 def finish(connection, job_id, token, *, result=None, error=None, retryable=False):
@@ -209,7 +224,8 @@ def finish(connection, job_id, token, *, result=None, error=None, retryable=Fals
         if os.getenv("RESEARCHHUB_DEMO_MODE") != "1":
             try:
                 artifact_id = enqueue(connection, job["project_id"], encode_result(result), timestamp,
-                                      kind="RESULT", content_type="application/json", job_id=job_id)
+                                      kind="RESULT", content_type="application/json", job_id=job_id,
+                                      trace_id=job["correlation_id"])
             except StorageQuotaExceeded:
                 fail(connection, job, "artifact_quota_exceeded", timestamp, False)
                 return True

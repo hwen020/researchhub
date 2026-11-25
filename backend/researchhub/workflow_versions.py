@@ -14,6 +14,7 @@ from .workflows import definition_checksum, start, validate
 def get_version(connection, project_id, version_id):
     version = connection.execute(select(workflow_versions).join(workflow_definitions).where(
         workflow_definitions.c.project_id == project_id, workflow_versions.c.id == version_id,
+        workflow_definitions.c.system_kind.is_(None),
     )).mappings().one_or_none()
     if version is None:
         raise LookupError("Workflow version not found")
@@ -58,6 +59,7 @@ def publish(connection, project_id, definition, defaults, *, name=None, definiti
     else:
         existing = connection.execute(select(workflow_definitions.c.id).where(
             workflow_definitions.c.project_id == project_id, workflow_definitions.c.id == definition_id,
+            workflow_definitions.c.system_kind.is_(None),
         ).with_for_update()).scalar_one_or_none()
         if existing is None:
             raise LookupError("Workflow definition not found")

@@ -6,6 +6,7 @@ from sqlalchemy.exc import OperationalError
 from .artifacts import publish
 from .db import connect
 from .demo_fixture import demo_project
+from .notifications import publish as publish_notifications
 from .queue import now_ms
 from .storage import managed_storage
 from .workflows import reconcile
@@ -22,6 +23,9 @@ def run():
                 if project_id is None:
                     trigger_due(connection)
                 reconcile(connection, project_id=project_id)
+            if project_id is None:
+                with engine.begin() as connection:
+                    publish_notifications(connection)
             if storage is not None:
                 for _ in range(4):
                     with engine.begin() as connection:

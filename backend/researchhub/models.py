@@ -59,6 +59,8 @@ jobs = Table(
     Column("result", JSON),
     Column("manifest", JSON),
     Column("provenance", JSON),
+    Column("correlation_id", String(36)),
+    Column("workflow_run_id", ForeignKey("workflow_runs.id")),
     Column("capability", String(32), nullable=False, server_default="GENERAL"),
     Column("cpu_units", Integer, nullable=False, server_default="1"),
     Column("memory_units", Integer, nullable=False, server_default="1"),
@@ -95,6 +97,8 @@ workflow_definitions = Table(
     Column("id", String(36), primary_key=True),
     Column("project_id", ForeignKey("projects.id"), nullable=False),
     Column("name", String(120), nullable=False),
+    Column("system_kind", String(32)),
+    UniqueConstraint("project_id", "system_kind", name="workflow_snapshot_kind"),
 )
 Index("workflow_definitions_project", workflow_definitions.c.project_id)
 workflow_versions = Table(
@@ -120,8 +124,12 @@ workflow_runs = Table(
     Column("parent_id", ForeignKey("workflow_runs.id")),
     Column("parameters", JSON),
     Column("definition_checksum", String(64), nullable=False),
+    Column("correlation_id", String(36)),
+    Column("created_at", BigInteger),
+    Column("completed_at", BigInteger),
 )
 Index("workflow_schedule", workflow_runs.c.state, workflow_runs.c.checked_at)
+Index("workflow_completed_at", workflow_runs.c.completed_at)
 workflow_schedules = Table(
     "workflow_schedules", metadata,
     Column("id", String(36), primary_key=True),
@@ -193,6 +201,7 @@ artifacts = Table(
     Column("attempts", Integer, nullable=False, server_default="0"),
     Column("last_error", String(64)),
     Column("publish_ms", BigInteger),
+    Column("correlation_id", String(36)),
     UniqueConstraint("project_id", "request_key"),
     CheckConstraint("size > 0 AND version > 0", name="artifact_size_version"),
     CheckConstraint("state IN ('PENDING','AVAILABLE','FAILED')", name="artifact_state"),
@@ -220,6 +229,25 @@ system_audit = Table(
     Column("action", String(40), nullable=False),
     Column("subject_id", String(36), nullable=False),
     Column("timestamp", BigInteger, nullable=False),
+)
+notifications = Table(
+    "notifications", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("project_id", ForeignKey("projects.id"), nullable=False),
+    Column("kind", String(32), nullable=False),
+    Column("subject_id", String(36), nullable=False),
+    Column("message", String(500), nullable=False),
+    Column("created_at", BigInteger, nullable=False),
+    Column("correlation_id", String(36)),
+    Column("published_sequence", BigInteger, unique=True),
+    UniqueConstraint("kind", "subject_id"),
+)
+Index("notifications_feed", notifications.c.project_id, notifications.c.published_sequence)
+notification_receipts = Table(
+    "notification_receipts", metadata,
+    Column("notification_id", ForeignKey("notifications.id"), primary_key=True),
+    Column("user_id", ForeignKey("users.id"), primary_key=True),
+    Column("read_at", BigInteger, nullable=False),
 )
 api_rate_limits = Table(
     "api_rate_limits", metadata,

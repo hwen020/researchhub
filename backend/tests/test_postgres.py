@@ -415,6 +415,35 @@ class PostgresIntegration(unittest.TestCase):
                     storage.delete(key)
                 storage.client.delete_bucket(Bucket=bucket)
 
+    def test_notification_replay_orders_committed_messages_and_read_state(self):
+        from researchhub.notifications import enqueue, feed, mark, publish
+        from researchhub.queue import now_ms
+
+        subject_one, subject_two = str(uuid4()), str(uuid4())
+        with self.engine.begin() as delayed:
+            enqueue(delayed, "project", "ANNOUNCEMENT", subject_one, "Commits later", now_ms(delayed))
+            with self.engine.begin() as conn:
+                enqueue(conn, "project", "ANNOUNCEMENT", subject_two, "Commits first", now_ms(conn))
+                enqueue(conn, "project", "ANNOUNCEMENT", subject_two, "Duplicate", now_ms(conn))
+            with self.engine.begin() as conn:
+                self.assertEqual(publish(conn), 1)
+                first = feed(conn, "project", "requester", 0, 100, False)
+                self.assertEqual([item["subject_id"] for item in first], [subject_two])
+                cursor = first[0]["sequence"]
+        with self.engine.begin() as conn:
+            self.assertEqual(publish(conn), 1)
+            self.assertEqual(publish(conn), 0)
+            replay = feed(conn, "project", "requester", cursor, 100, False)
+            self.assertEqual([item["subject_id"] for item in replay], [subject_one])
+            self.assertEqual(feed(conn, "unknown", "requester", 0, 100, False), [])
+            notification_id = replay[0]["id"]
+            with self.assertRaises(LookupError):
+                mark(conn, "unknown", "requester", notification_id, True, now_ms(conn), False)
+            mark(conn, "project", "requester", notification_id, True, now_ms(conn), False)
+        with self.engine.begin() as conn:
+            self.assertTrue(feed(conn, "project", "requester", cursor, 100, False)[0]["read"])
+            self.assertFalse(feed(conn, "project", "reviewer", cursor, 100, True)[0]["read"])
+
     def test_v1_schema_upgrades_and_preserves_existing_workflow(self):
         from alembic import command
         from alembic.config import Config
@@ -527,6 +556,7 @@ class PostgresIntegration(unittest.TestCase):
             manifest = client.get(job_url + "/download/manifest", auth=owner).json()
             self.assertEqual(manifest["dataset"], {"id": dataset_id, "version": 1, "sha256": version.json()["checksum"]})
             self.assertEqual(manifest["inputs"], {"observations": [1, 2, 3]})
+            self.assertEqual(manifest["input_artifact_id"], version.json()["artifact_id"])
             self.assertEqual(manifest["output_sha256"], hashlib.sha256(b'{"mean":"2"}').hexdigest())
             self.assertEqual(manifest["plugin_version"], "1")
             self.assertEqual(manifest["code_version"], "fixture")

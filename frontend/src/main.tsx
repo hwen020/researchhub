@@ -5,22 +5,24 @@ import './style.css'
 type Project = { id: string, name: string, organization: string, role: string }
 type Job = { id: string, state: string, plugin: string, attempt: number, result: unknown, wait_reason?: string }
 type Workflow = { id: string, state: string, version_id?: string, parent_id?: string,
-  dependencies: Record<string, string[]>, nodes: Record<string, { state: string, reused_from?: string }> }
+  dependencies: Record<string, string[]>, conditions: Record<string, { mode: string }>, nodes: Record<string, { state: string, reused_from?: string }> }
 type Quota = { max_concurrent: number, max_queued: number, quota_cpu: number, quota_memory: number, storage_quota_bytes: number }
 type Resources = { quota: Quota, usage: { active: number, queued: number, cpu_units: number, memory_units: number }, storage_bytes: number }
+type ProjectNotice = { id: string, sequence: number, message: string, kind: string, created_at: number, read: boolean }
 type Artifact = { id: string, kind: string, version: number, state: string, size: number, checksum: string }
 type Worker = { id: string, capabilities: string[], cpu_units: number, memory_units: number }
 type Template = { id: string, name: string }
 type WorkflowVersion = { id: string, version: number, checksum: string }
 type Schedule = { id: string, next_at: number | null, zone: string }
 type Dataset = { id: string, name: string }
+type DatasetVersion = { id: string, version: number, checksum: string, size: number, state?: string }
 type Organization = { id: string, name: string }
 type Member = { username: string, role: 'pi' | 'researcher' | 'finance' }
 type Funding = {
   budget: { limit: number, spent: number },
   requests: { id: string, purpose: string, amount: number, state: string }[],
 }
-const sections = ['Overview', 'Jobs', 'Workflows', 'Resources', 'Datasets', 'Artifacts', 'Funding', 'Members', 'Audit', 'System health', 'Administration'] as const
+const sections = ['Overview', 'Jobs', 'Workflows', 'Resources', 'Datasets', 'Artifacts', 'Notifications', 'Funding', 'Members', 'Audit', 'System health', 'Administration'] as const
 type Section = typeof sections[number]
 
 function Workspace() {
@@ -32,13 +34,18 @@ function Workspace() {
   const [workflows, setWorkflows] = useState<Workflow[]>([])
   const [resources, setResources] = useState<Resources | null>(null)
   const [artifactList, setArtifactList] = useState<Artifact[]>([])
+  const [notices, setNotices] = useState<ProjectNotice[]>([])
+  const [noticeError, setNoticeError] = useState('')
   const [workerList, setWorkerList] = useState<Worker[]>([])
   const [templates, setTemplates] = useState<Template[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState('')
   const [versions, setVersions] = useState<WorkflowVersion[]>([])
+  const [scheduleVersion, setScheduleVersion] = useState('')
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [isDemo, setIsDemo] = useState(false)
   const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [selectedDataset, setSelectedDataset] = useState('')
+  const [datasetVersions, setDatasetVersions] = useState<DatasetVersion[]>([])
   const [funding, setFunding] = useState<Funding | null>(null)
   const [members, setMembers] = useState<Member[]>([])
   const [memberRoles, setMemberRoles] = useState<Record<string, Member['role']>>({})
@@ -83,8 +90,14 @@ function Workspace() {
       }
       if (!projectId) return
       const base = '/projects/' + projectId
-      if (section === 'Overview' || section === 'Jobs') setJobs(await api<Job[]>(base + '/jobs'))
-      if (section === 'Overview' || section === 'Workflows') setWorkflows(await api<Workflow[]>(base + '/workflows'))
+      if (section === 'Overview' || section === 'Jobs') {
+        const currentJobs = await api<Job[]>(base + '/jobs')
+        if (refreshId === refreshSequence.current) setJobs(currentJobs)
+      }
+      if (section === 'Overview' || section === 'Workflows') {
+        const currentRuns = await api<Workflow[]>(base + '/workflows')
+        if (refreshId === refreshSequence.current) setWorkflows(currentRuns)
+      }
       if (section === 'Workflows' && !isDemo) {
         const [currentTemplates, currentSchedules, currentDatasets] = await Promise.all([
           api<Template[]>(base + '/workflow-templates'), api<Schedule[]>(base + '/workflow-schedules'),
@@ -140,10 +153,39 @@ function Workspace() {
 
   useEffect(() => {
     setSelectedTemplate('')
+    setScheduleVersion('')
+    setSelectedDataset('')
+    setDatasetVersions([])
     setTemplates([])
     setVersions([])
     setSchedules([])
   }, [projectId])
+
+  useEffect(() => {
+    if (!token || !projectId || section !== 'Notifications' || isDemo) return
+    let active = true
+    let cursor = 0
+    let timer: ReturnType<typeof setTimeout>
+    setNotices([])
+    setNoticeError('')
+    async function poll() {
+      let delay = 3000
+      try {
+        const update = await api<{ items: ProjectNotice[], cursor: number }>(projectPath + '/notifications?after=' + cursor)
+        if (!active) return
+        cursor = update.cursor
+        if (update.items.length) setNotices((current) => [...update.items.slice().reverse(), ...current].slice(0, 200))
+        setNoticeError('')
+        if (update.items.length === 100) delay = 0
+      } catch (error) {
+        if (active) setNoticeError(String(error))
+      } finally {
+        if (active) timer = setTimeout(poll, delay)
+      }
+    }
+    void poll()
+    return () => { active = false; clearTimeout(timer) }
+  }, [token, projectId, section, isDemo])
 
   async function jsonAction(path: string, body: unknown, method = 'POST') {
     return api(path, { method, body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })
@@ -332,7 +374,7 @@ function Workspace() {
             {templates.length === 0 ? <p>No versioned templates in this project.</p> :
               <label>Template <select value={selectedTemplate} onChange={(event) => {
                 const id = event.target.value
-                setSelectedTemplate(id); setVersions([])
+                setSelectedTemplate(id); setScheduleVersion(''); setVersions([])
                 if (id) void run(async () => setVersions(await api<WorkflowVersion[]>(projectPath + '/workflow-templates/' + id + '/versions')))
               }}><option value="">Select a template</option>
                 {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
@@ -341,10 +383,73 @@ function Workspace() {
               {canCompute && <button onClick={() => void run(async () => {
                 await jsonAction(projectPath + '/workflow-versions/' + version.id + '/runs', {}); await refresh()
               })}>Run with defaults</button>}</li>)}</ul>
+            {canCompute && <details>
+              <summary>{selectedTemplate ? 'Publish a new version' : 'Create workflow template'}</summary>
+              <form className="workspace-form" onSubmit={(event) => {
+                event.preventDefault()
+                const form = event.currentTarget
+                const data = new FormData(form)
+                void run(async () => {
+                  const definition = JSON.parse(String(data.get('definition')))
+                  const path = projectPath + '/workflow-templates'
+                  await jsonAction(selectedTemplate ? path + '/' + selectedTemplate + '/versions' : path,
+                    selectedTemplate ? definition : { ...definition, name: data.get('name') })
+                  form.reset()
+                  await refresh()
+                })
+              }}>
+                {!selectedTemplate && <label>Template name<input name="name" maxLength={120} required /></label>}
+                <label>Workflow definition JSON<textarea name="definition" rows={6} required defaultValue={JSON.stringify({
+                  nodes: { summary: { plugin: 'summary@1', parameters: { observations: { $parameter: 'values' } } } },
+                  defaults: { values: [1, 2, 3] },
+                }, null, 2)} /></label>
+                <button className="primary">Publish template version</button>
+              </form>
+            </details>}
+            {canCompute && versions.length > 0 && <details>
+              <summary>Schedule a workflow version</summary>
+              <form className="quota-form" onSubmit={(event) => {
+                event.preventDefault()
+                const form = new FormData(event.currentTarget)
+                void run(async () => {
+                  const interval = form.get('interval')
+                  await jsonAction(projectPath + '/workflow-versions/' + scheduleVersion + '/schedules', {
+                    start_at: form.get('when'), zone: form.get('zone'),
+                    interval_seconds: interval ? Number(interval) : null,
+                  })
+                  await refresh()
+                })
+              }}>
+                <label>Workflow version<select value={scheduleVersion} required onChange={(event) =>
+                  setScheduleVersion(event.target.value)}><option value="">Select a version</option>
+                  {versions.map((version) => <option value={version.id} key={version.id}>Version {version.version}</option>)}</select></label>
+                <label>Start time with offset<input name="when" placeholder="2026-12-01T09:00:00+00:00" required /></label>
+                <label>Timezone<input name="zone" defaultValue="UTC" required /></label>
+                <label>Repeat interval in seconds<input name="interval" type="number" min="60" /></label>
+                <button className="primary">Schedule run</button>
+              </form>
+            </details>}
             {schedules.length === 0 ? <p>No scheduled workflows.</p> :
               <ul>{schedules.map((schedule) => <li key={schedule.id}>{schedule.next_at === null ? 'Completed' :
-                new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZone: schedule.zone }).format(schedule.next_at)} · {schedule.zone}</li>)}</ul>}
+                new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZone: schedule.zone }).format(schedule.next_at)} · {schedule.zone}
+                {canCompute && schedule.next_at !== null && <button onClick={() => void run(async () => {
+                  await api(projectPath + '/workflow-schedules/' + schedule.id, { method: 'DELETE' })
+                  await refresh()
+                })}>Stop schedule</button>}</li>)}</ul>}
           </section>}
+          {workflows.length > 1 && <form className="panel quota-form" onSubmit={(event) => {
+            event.preventDefault()
+            const form = new FormData(event.currentTarget)
+            void run(async () => {
+              setDetails(await api(projectPath + '/workflows/' + form.get('left') + '/compare/' + form.get('right')))
+            })
+          }}>
+            {([['left', 'First run'], ['right', 'Second run']] as const).map(([key, label]) => <label key={key}>{label}
+              <select name={key} required><option value="">Choose a run</option>{workflows.map((workflow) =>
+                <option value={workflow.id} key={workflow.id}>{workflow.state} {workflow.id.slice(0, 8)}</option>)}</select>
+            </label>)}
+            <button>Compare runs</button>
+          </form>}
           {workflows.length === 0 && !loading && <p>No workflow runs in this project.</p>}
           {workflows.map((workflow) => {
             const path = projectPath + '/workflows/' + workflow.id
@@ -365,7 +470,8 @@ function Workspace() {
               </div>
               <ol>{Object.entries(workflow.nodes).map(([name, node]) => <li key={name}>
                 <b>{name}</b><span>{node.state}{node.reused_from && ' · reused'}</span>
-                {workflow.dependencies?.[name]?.length > 0 && <small>After {workflow.dependencies[name].join(', ')}</small>}
+                {workflow.dependencies?.[name]?.length > 0 && <small>After {workflow.dependencies[name].join(', ')}
+                  {workflow.conditions?.[name] && ' · ' + workflow.conditions[name].mode.replaceAll('_', ' ')}</small>}
                 {canRerun && ['FAILED', 'CANCELLED'].includes(node.state) && <button onClick={() => void run(async () => {
                   await jsonAction(path + '/rerun', { failed_node: name }); await refresh()
                 })}>Rerun from {name}</button>}
@@ -386,9 +492,77 @@ function Workspace() {
                 ))}>Download</button>}</td>
               </tr>)}</tbody></table>}
         </section>}
-        {section === 'Datasets' && <section className="panel"><ul>{datasets.map((dataset) => <li key={dataset.id}>
-          <button onClick={() => void run(async () => setDetails(await api('/projects/' + projectId + '/datasets/' + dataset.id + '/versions')))}>{dataset.name}</button>
-        </li>)}</ul>{datasets.length === 0 && <p>No datasets registered in this project.</p>}</section>}
+        {section === 'Datasets' && <section className="panel">
+          {canCompute && <form className="quota-form" onSubmit={(event) => {
+            event.preventDefault()
+            const form = event.currentTarget
+            const name = new FormData(form).get('name')
+            void run(async () => {
+              await jsonAction(projectPath + '/datasets', { name })
+              form.reset()
+              await refresh()
+            })
+          }}>
+            <label>Dataset name<input name="name" maxLength={200} required /></label>
+            <button className="primary">Register dataset</button>
+          </form>}
+          <ul>{datasets.map((dataset) => <li key={dataset.id}>
+            <button onClick={() => void run(async () => {
+              const items = await api<DatasetVersion[]>(projectPath + '/datasets/' + dataset.id + '/versions')
+              setSelectedDataset(dataset.id); setDatasetVersions(items)
+            })}>{dataset.name}</button>
+          </li>)}</ul>
+          {datasets.length === 0 && <p>No datasets registered in this project.</p>}
+          {selectedDataset && <>
+            <h2>Dataset versions</h2>
+            {canCompute && <form className="quota-form" onSubmit={(event) => {
+              event.preventDefault()
+              const form = event.currentTarget
+              const file = new FormData(form).get('csv')
+              if (!(file instanceof File) || !file.size) return
+              const path = projectPath + '/datasets/' + selectedDataset + '/versions'
+              void run(async () => {
+                await api(path, { method: 'POST', body: file,
+                  headers: { 'Content-Type': 'text/csv', 'Idempotency-Key': crypto.randomUUID() } })
+                form.reset()
+                setDatasetVersions(await api<DatasetVersion[]>(path))
+              })
+            }}>
+              <label>CSV file<input name="csv" type="file" accept=".csv,text/csv" required /></label>
+              <button className="primary">Upload new version</button>
+            </form>}
+            <ul>{datasetVersions.map((version) => <li key={version.id}>
+              Version {version.version} · {version.size} bytes · {version.state ?? 'AVAILABLE'}
+              {(!version.state || version.state === 'AVAILABLE') && <button onClick={() => void run(() => download(
+                projectPath + '/datasets/' + selectedDataset + '/versions/' + version.version, 'dataset.csv',
+              ))}>Download dataset</button>}
+            </li>)}</ul>
+          </>}
+        </section>}
+        {section === 'Notifications' && <section className="panel">
+          {['pi', 'platform_admin'].includes(project?.role ?? '') && <form className="quota-form" onSubmit={(event) => {
+            event.preventDefault()
+            const form = event.currentTarget
+            const message = new FormData(form).get('message')
+            void run(async () => {
+              await jsonAction(projectPath + '/notifications/announcements', { message })
+              form.reset()
+            })
+          }}>
+            <label>Project announcement<input name="message" maxLength={500} required /></label>
+            <button className="primary">Post announcement</button>
+          </form>}
+          {noticeError && <p role="alert" className="status">{noticeError}</p>}
+          {notices.length === 0 && <p>No project notifications.</p>}
+          <ul className="notice-list">{notices.map((notice) => <li key={notice.id}>
+            <div><strong>{notice.message}</strong> <span className="badge">{notice.read ? 'Read' : 'Unread'}</span></div>
+            <small>{new Date(notice.created_at).toLocaleString()}</small>
+            <button onClick={() => void run(async () => {
+              await jsonAction(projectPath + '/notifications/' + notice.id + '/read', { read: !notice.read }, 'PUT')
+              setNotices((items) => items.map((item) => item.id === notice.id ? { ...item, read: !notice.read } : item))
+            })}>{notice.read ? 'Mark unread' : 'Mark read'}</button>
+          </li>)}</ul>
+        </section>}
         {section === 'Funding' && funding && <section className="panel">
           <p>Available balance <strong>{funding.budget.limit - funding.budget.spent}</strong> minor currency units</p>
           {project?.role !== 'finance' && <form className="action" onSubmit={(event) => {

@@ -6,6 +6,7 @@ from uuid import uuid4
 from sqlalchemy import func, select, text
 
 from .models import artifacts, datasets, projects, versions
+from .observability import correlation_id, emit
 from .storage import MAX_ARTIFACT_BYTES, checksum, managed_storage
 
 
@@ -39,7 +40,7 @@ def usage(connection, project_id):
 
 
 def enqueue(connection, project_id, data, timestamp, *, kind, content_type, version=1,
-            dataset_version_id=None, job_id=None, owner_id=None, request_key=None):
+            dataset_version_id=None, job_id=None, owner_id=None, request_key=None, trace_id=None):
     if not 0 < len(data) <= MAX_ARTIFACT_BYTES:
         raise ValueError("Artifact size must be between one byte and two MiB")
     quota_lock(connection, project_id)
@@ -55,7 +56,7 @@ def enqueue(connection, project_id, data, timestamp, *, kind, content_type, vers
         dataset_version_id=dataset_version_id, job_id=job_id, request_key=request_key,
         kind=kind, version=version, checksum=checksum(data), size=len(data),
         content_type=content_type, state="PENDING", payload=data, attempts=0,
-        created_at=timestamp, next_attempt_at=timestamp,
+        created_at=timestamp, next_attempt_at=timestamp, correlation_id=correlation_id(trace_id),
     ))
     return artifact_id
 
@@ -97,7 +98,10 @@ def publish(connection, storage, timestamp, artifact_id=None):
     connection.execute(artifacts.update().where(artifacts.c.id == row["id"]).values(
         attempts=attempts, **values,
     ))
-    return values.get("state", "PENDING")
+    state = values.get("state", "PENDING")
+    emit("artifact_publication_attempt", correlation_id=row["correlation_id"], artifact_id=row["id"],
+         job_id=row["job_id"], attempt=attempts, provisional_state=state)
+    return state
 
 
 def get_bytes(storage, artifact):

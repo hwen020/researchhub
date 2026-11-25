@@ -4,7 +4,7 @@
 
 Independent branch `feature/researchhub-v2` begins at the published v1 documentation commit `b7afbbe`. The current checkpoint covers resource scheduling, advanced workflow lifecycle and two dataset-backed scientific pipelines. The fixed demo profile passed local authorization and genomics execution checks. The live deployment was inspected through readiness only.
 
-The PostgreSQL backend checkpoint passed 33 tests and 3 subtests. The production frontend bundle built successfully. See [v2 test evidence](docs/test-report-v2.md) and [resume instructions](NEXT_STEPS.md). The headings below record the v1 handoff.
+The first checkpoint passed 33 PostgreSQL tests and 3 subtests. Later checkpoints added real S3 consistency, persistent notification replay, a local backend contract and measured v2 performance. The latest evidence is recorded in the v2 acceptance matrix. The production frontend bundle built successfully. See [v2 test evidence](docs/test-report-v2.md) and [resume instructions](NEXT_STEPS.md). The headings below record the v1 handoff.
 
 ## Release decision
 

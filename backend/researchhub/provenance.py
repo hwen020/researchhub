@@ -39,6 +39,8 @@ def manifest(connection, project_id, run_id):
         ).where(workflow_versions.c.id == run["version_id"])).mappings().one()
     return {
         "run_id": run["id"], "project_id": project_id, "state": run["state"],
+        "correlation_id": run["correlation_id"], "created_at_ms": run["created_at"],
+        "completed_at_ms": run["completed_at"],
         "version": dict(version) if version else None, "parent_run_id": run["parent_id"],
         "definition_sha256": run["definition_checksum"], "parameters": run["parameters"],
         "nodes": nodes,

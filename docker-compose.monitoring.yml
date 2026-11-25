@@ -1,0 +1,32 @@
+services:
+  api:
+    environment:
+      RESEARCHHUB_METRICS_TOKEN_FILE: /run/secrets/metrics_token
+    secrets: [metrics_token]
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [monitoring]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - metrics_data:/prometheus
+    secrets: [metrics_token]
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: [monitoring]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set a local Grafana password}
+    volumes:
+      - ./monitoring/datasources.yml:/etc/grafana/provisioning/datasources/researchhub.yml:ro
+    ports:
+      - "127.0.0.1:${RESEARCHHUB_GRAFANA_PORT:-3000}:3000"
+
+secrets:
+  metrics_token:
+    file: ${RESEARCHHUB_METRICS_TOKEN_FILE:?write an untracked local metrics token file}
+
+volumes:
+  metrics_data:

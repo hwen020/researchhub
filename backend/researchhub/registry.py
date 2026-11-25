@@ -92,7 +92,7 @@ def read_version(connection, storage, project_id, dataset_id, version):
     data = get_bytes(managed_storage(storage), artifact) if artifact else storage.read(row["id"])
     if len(data) != row["size"] or checksum(data) != row["checksum"]:
         raise OSError("Dataset integrity check failed")
-    return row, data
+    return dict(row, artifact_id=artifact["id"] if artifact else None), data
 
 
 def download(connection, storage, project_id, dataset_id, version):
@@ -118,5 +118,8 @@ def compute_inputs(connection, storage, project_id, dataset_id, version, plugin)
         parameters = {"rows": list(islice(reader, MAX_ROWS + 1))}
     else:
         raise ValueError("Dataset columns do not match the plugin")
-    return parameters, {"id": dataset_id, "version": row["version"], "sha256": row["checksum"]}
+    provenance = {"id": dataset_id, "version": row["version"], "sha256": row["checksum"]}
+    if row["artifact_id"] is not None:
+        provenance["artifact_id"] = row["artifact_id"]
+    return parameters, provenance
 
