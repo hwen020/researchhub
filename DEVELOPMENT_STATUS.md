@@ -2,7 +2,7 @@
 
 ## Safe pause and release handoff
 
-Development is paused on `feature/researchhub-v2`. The code and test candidate is `6fd8d765c8647d2ea8215f718b2427c3ecc2ab36`, verified on the remote branch before this documentation-only handoff. [GitHub Actions run 45547622128](https://github.com/hwen020/researchhub/actions/runs/45547622128) was **PENDING** (`in_progress`) when recorded. The handoff commit skips CI and leaves the candidate code and workflows intact.
+Development has completed the v2 release handoff. The accepted feature SHA is `ee41b1b0ec5b40bc97347629df9618350e93b241`, merged to `main`. [GitHub Actions run 45553387895](https://github.com/hwen020/researchhub/actions/runs/45553387895) passed backend, frontend and compose, including the three 390 px browser scenarios and fixed Genomics demo image smoke test.
 
 - Local acceptance recorded 36 passing backend tests using PostgreSQL and VersityGW, and three passing 390 px Edge tests against the isolated two-Worker Compose stack at Alembic head `0012`.
 - PostgreSQL stop/start returned HTTP 503 during the outage and 200 after restart. The same idempotency key replayed the retained job, which completed with mean 4. The VersityGW process restart recovered a pending intent and verified the exact staged bytes.

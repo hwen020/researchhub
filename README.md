@@ -32,7 +32,7 @@ Export a new bootstrap username and password in the invoking shell before runnin
 
 ## Release verification status
 
-The published v1.0.0 release passed 25 PostgreSQL backend tests and two 390 px Edge checks. The v2 development branch has separate acceptance results. [v1.0.0 release](https://github.com/hwen020/researchhub/releases/tag/v1.0.0).
+The published v1.0.0 release passed 25 PostgreSQL backend tests and two 390 px Edge checks. The v2 candidate passed 36 local/CI-backend tests, three 390 px browser scenarios and all [GitHub Actions run 45553387895](https://github.com/hwen020/researchhub/actions/runs/45553387895) jobs. [v1.0.0 release](https://github.com/hwen020/researchhub/releases/tag/v1.0.0).
 
 ## License
 

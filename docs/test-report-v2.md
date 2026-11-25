@@ -19,6 +19,8 @@ The live v1 readiness endpoint returned HTTP 200 during baseline inspection. Pub
 
 ## v2 integration checkpoint
 
+- Final candidate SHA `ee41b1b0ec5b40bc97347629df9618350e93b241` passed [GitHub Actions run 45553387895](https://github.com/hwen020/researchhub/actions/runs/45553387895): backend, frontend and compose, including three 390 px browser scenarios and the fixed Genomics demo image smoke test.
+
 - The local Python suite completed 36 tests across real PostgreSQL and VersityGW, including versioned workflows, notification replay, quota/admission regressions and S3 consistency.
 - The full local 390 px Edge pass covered three scenarios against the migrated two-Worker Compose stack. The new scenario registered and uploaded the synthetic Mobility dataset, ran the five-stage DAG, opened provenance and the artifact registry, and verified persistent notification read state.
 - A separate repeatable test terminated the real VersityGW process and restarted it on the same backend directory. PostgreSQL retained the PENDING intent during the outage, and the publisher verified and served the exact staged bytes after restart.
