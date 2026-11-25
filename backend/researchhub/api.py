@@ -3,6 +3,7 @@ import time
 import hashlib
 import hmac
 import io
+import json
 import os
 import secrets
 import threading
@@ -18,20 +19,23 @@ from sqlalchemy import case, delete, func, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 
+from .artifacts import ArtifactUnavailable, StorageQuotaExceeded, get_bytes, publish as publish_artifact
+from .artifacts import quota_lock as storage_quota_lock
+from .artifacts import usage as storage_usage
 from .auth import hash_password, require_project, verify_password
 from .db import connect
 from .finance import decide, request_funds
 from .demo_fixture import GUEST_ID, PROJECT_ID
-from .models import api_rate_limits, audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, system_audit, users, versions, workers, workflow_runs
+from .models import api_rate_limits, artifacts, audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, system_audit, users, versions, workers, workflow_runs
 from .plugins import validate_parameters
 from .queue import IdempotencyConflict, cancel, now_ms, submit
 from .resource_policy import (
     ACTIVE, READY, QUOTA_FIELDS, QueueFull, online_workers, project_usage,
     scheduling_lock, system_limit, wait_reason,
 )
-from .registry import MAX_UPLOAD, compute_inputs, download, register, upload
+from .registry import MAX_UPLOAD, compute_inputs, download, register, stage_upload
 from .research_workflows import start_research
-from .storage import LocalStorage
+from .storage import LocalStorage, managed_storage
 from . import provenance as run_provenance
 from .models import workflow_definitions, workflow_schedules, workflow_versions
 from .workflow_versions import create_schedule, publish, start_version
@@ -93,6 +97,11 @@ class RequestMetricsMiddleware:
 app.add_middleware(RequestMetricsMiddleware)
 
 
+@app.exception_handler(ArtifactUnavailable)
+async def unavailable_artifact(request, exc):
+    return JSONResponse({"detail": str(exc)}, status_code=503, headers={"Retry-After": "2"})
+
+
 class DatasetReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: UUID
@@ -116,6 +125,7 @@ class ResourceQuotaInput(RequestModel):
     max_queued: int = Field(ge=1, le=10000)
     quota_cpu: int = Field(ge=1, le=100000)
     quota_memory: int = Field(ge=1, le=100000)
+    storage_quota_bytes: int | None = Field(None, ge=1, le=10**12)
 
 
 class DependencyCondition(RequestModel):
@@ -575,13 +585,22 @@ def download_job(project_id: UUID, job_id: UUID, kind: Literal["manifest", "json
     headers = {"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"}
     if os.getenv("RESEARCHHUB_DEMO_MODE") != "1":
         log_action(connection, user, project, "job_artifact_download", str(job_id))
+    result = row["result"]
+    if kind != "manifest" and row["manifest"] and row["manifest"].get("output_artifact_id"):
+        artifact_id = row["manifest"]["output_artifact_id"]
+        adapter = managed_storage()
+        publish_artifact(connection, adapter, now_ms(connection), artifact_id)
+        artifact = connection.execute(select(artifacts).where(
+            artifacts.c.project_id == project, artifacts.c.id == artifact_id,
+        )).mappings().one()
+        result = json.loads(get_bytes(adapter, artifact))
     if kind == "geojson":
-        if "geojson" not in row["result"]:
+        if "geojson" not in result:
             raise HTTPException(404, "GeoJSON is unavailable for this job")
-        return JSONResponse(row["result"]["geojson"], media_type="application/geo+json", headers=headers)
+        return JSONResponse(result["geojson"], media_type="application/geo+json", headers=headers)
     if kind != "csv":
-        return JSONResponse(row["manifest"] if kind == "manifest" else row["result"], headers=headers)
-    records = row["result"].get("associations", row["result"].get("records", [row["result"]]))
+        return JSONResponse(row["manifest"] if kind == "manifest" else result, headers=headers)
+    records = result.get("associations", result.get("records", [result]))
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=list(records[0]))
     writer.writeheader()
@@ -650,10 +669,11 @@ def list_projects(user=Depends(authenticate), connection=Depends(transaction, sc
 def get_resources(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
     authorize(connection, user, project, ALL_ROLES)
-    quota = connection.execute(select(*(projects.c[field] for field in QUOTA_FIELDS)).where(
+    quota = connection.execute(select(*(projects.c[field] for field in QUOTA_FIELDS), projects.c.storage_quota_bytes).where(
         projects.c.id == project,
     )).mappings().one()
-    return {"quota": dict(quota), "usage": project_usage(connection, project)}
+    return {"quota": dict(quota), "usage": project_usage(connection, project),
+            "storage_bytes": storage_usage(connection, project)}
 
 
 @app.put("/projects/{project_id}/resources")
@@ -662,8 +682,11 @@ def update_resources(project_id: UUID, body: ResourceQuotaInput, user=Depends(au
     project = str(project_id)
     require_admin(user)
     scheduling_lock(connection)
-    quota = body.model_dump()
+    storage_quota_lock(connection, project)
+    quota = body.model_dump(exclude_none=True)
     usage = project_usage(connection, project)
+    if body.storage_quota_bytes is not None and body.storage_quota_bytes < storage_usage(connection, project):
+        raise HTTPException(409, "Storage quota would be lower than reserved bytes")
     oversized = connection.execute(select(jobs.c.id).where(
         jobs.c.project_id == project, jobs.c.state.in_(ACTIVE + READY),
         (jobs.c.cpu_units > body.quota_cpu) | (jobs.c.memory_units > body.quota_memory),
@@ -999,6 +1022,32 @@ async def csv_body(request: Request):
     return bytes(data)
 
 
+@app.get("/projects/{project_id}/artifacts")
+def list_artifacts(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    columns = [column for column in artifacts.c if column.name not in {"payload", "request_key"}]
+    query = select(*columns).where(artifacts.c.project_id == project).order_by(artifacts.c.created_at.desc()).limit(100)
+    return [dict(row) for row in connection.execute(query).mappings()]
+
+
+@app.get("/projects/{project_id}/artifacts/{artifact_id}/download")
+def download_artifact(project_id: UUID, artifact_id: UUID, user=Depends(authenticate),
+                      connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    artifact = connection.execute(select(artifacts).where(
+        artifacts.c.project_id == project, artifacts.c.id == str(artifact_id),
+    )).mappings().one_or_none()
+    if artifact is None:
+        raise HTTPException(404, "Artifact not found")
+    filename = "dataset.csv" if artifact["kind"] == "DATASET" else "result.json"
+    return Response(get_bytes(managed_storage(), artifact), media_type=artifact["content_type"], headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+    })
+
+
 @app.get("/projects/{project_id}/datasets")
 def list_datasets(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
@@ -1020,23 +1069,40 @@ def register_dataset(project_id: UUID, body: DatasetInput, user=Depends(authenti
 def list_versions(project_id: UUID, dataset_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
     authorize(connection, user, project, COMPUTE_ROLES)
-    query = select(versions).join(datasets).where(datasets.c.project_id == project, datasets.c.id == str(dataset_id))
+    query = select(versions, artifacts.c.id.label("artifact_id"), artifacts.c.state).join(datasets).outerjoin(
+        artifacts, artifacts.c.dataset_version_id == versions.c.id,
+    ).where(datasets.c.project_id == project, datasets.c.id == str(dataset_id))
     return [dict(row) for row in connection.execute(query.order_by(versions.c.version.desc()).limit(100)).mappings()]
 
 
 @app.post("/projects/{project_id}/datasets/{dataset_id}/versions")
-def upload_dataset(project_id: UUID, dataset_id: UUID, user=Depends(authenticate), data=Depends(csv_body),
-                   connection=Depends(transaction, scope="function")):
+def upload_dataset(project_id: UUID, dataset_id: UUID, response: Response,
+                   key: str | None = Header(None, alias="Idempotency-Key", min_length=1, max_length=128),
+                   user=Depends(authenticate), data=Depends(csv_body)):
     project = str(project_id)
-    authorize(connection, user, project, COMPUTE_ROLES)
     try:
-        version = upload(connection, storage(), project, str(dataset_id), data)
-        log_action(connection, user, project, "dataset_uploaded", version["id"])
-        return version
+        with engine.begin() as connection:
+            authorize(connection, user, project, COMPUTE_ROLES)
+            version, created = stage_upload(connection, project, str(dataset_id), user["id"], data,
+                                            now_ms(connection), key)
+            if created:
+                log_action(connection, user, project, "dataset_uploaded", version["id"])
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except (IdempotencyConflict, StorageQuotaExceeded) as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if version["state"] == "PENDING":
+        with engine.begin() as connection:
+            publish_artifact(connection, managed_storage(), now_ms(connection), version["artifact_id"])
+            version["state"] = connection.execute(select(artifacts.c.state).where(
+                artifacts.c.id == version["artifact_id"],
+            )).scalar_one()
+    if version["state"] == "PENDING":
+        response.status_code = 202
+        response.headers["Retry-After"] = "2"
+    return version
 
 
 @app.get("/projects/{project_id}/datasets/{dataset_id}/versions/{version}")
@@ -1048,7 +1114,8 @@ def download_dataset(project_id: UUID, dataset_id: UUID, version: int,
         data = download(connection, storage(), project, str(dataset_id), version)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
-    log_action(connection, user, project, "dataset_downloaded", str(dataset_id))
+    if os.getenv("RESEARCHHUB_DEMO_MODE") != "1":
+        log_action(connection, user, project, "dataset_downloaded", str(dataset_id))
     return Response(data, media_type="text/csv", headers={
         "Content-Disposition": 'attachment; filename="dataset.csv"',
         "X-Content-Type-Options": "nosniff",

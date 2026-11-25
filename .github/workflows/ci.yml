@@ -44,6 +44,17 @@ jobs:
       - run: python -m compileall -q researchhub
       - run: alembic upgrade head && alembic check
       - run: python -m pytest -q
+      - name: S3 consistency integration
+        env:
+          RESEARCHHUB_TEST_S3_ENDPOINT: http://127.0.0.1:17070
+          RESEARCHHUB_S3_ACCESS_KEY: synthetic-ci-s3
+          RESEARCHHUB_S3_SECRET_KEY: synthetic-ci-s3-only
+        run: |
+          docker run --rm -d --name researchhub-ci-s3 --tmpfs /data -p 127.0.0.1:17070:7070 \
+            -e ROOT_ACCESS_KEY="$RESEARCHHUB_S3_ACCESS_KEY" -e ROOT_SECRET_KEY="$RESEARCHHUB_S3_SECRET_KEY" \
+            ghcr.io/versity/versitygw:v1.7.0 --port :7070 posix /data
+          trap 'docker stop researchhub-ci-s3' EXIT
+          python -m pytest -q -k s3_reconciles
   frontend:
     runs-on: ubuntu-24.04
     defaults:

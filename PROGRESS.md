@@ -4,6 +4,8 @@
 - Added migration 0007, transactional resource admission, persisted project rotation, aging, worker capability matching and queue saturation reporting.
 - Added migration 0008, immutable workflow templates, conditional dependencies, lineage, local reruns and persistent schedules.
 - Exercised the fixed Genomics demo and Wearable Mobility exports with independent scheduler and worker processes. The local test checkpoint passed 33 tests and 3 subtests.
+- Pushed the Phase 0-3 checkpoint. GitHub Actions run 45544377608 passed. Both 390 px Edge tests passed against isolated two-worker Compose.
+- Added immutable artifact intents, storage quotas and retryable publication. The default storage snapshot passed 34 tests, and the S3-only test passed separately against VersityGW v1.7.0.
 
 - Resumed from handoff checkpoint `4df71f9`; committed Edge/mobile fixes as `c836a41`, administration as `5174185`, rate limits as `cd0df3c`, metrics as `e7119f9`, recovery as `dd0df55`, and full-regression fixes as `0286174`.
 - Added incremental migrations for run manifests, audit and worker heartbeats.

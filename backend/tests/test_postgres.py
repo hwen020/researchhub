@@ -1,6 +1,8 @@
 import os
 import hashlib
 import base64
+import csv
+import io
 import json
 import socket
 import subprocess
@@ -322,12 +324,96 @@ class PostgresIntegration(unittest.TestCase):
                 downloads = f'{endpoint}/jobs/{export["job_id"]}/download/'
                 csv_result = client.get(downloads + "csv", auth=credentials)
                 self.assertEqual(csv_result.status_code, 200)
-                self.assertIn("synthetic01,2025-01-01,3,60,0.111,1,0,0", csv_result.text)
+                record = next(csv.DictReader(io.StringIO(csv_result.text)))
+                self.assertEqual((record["participant_id"], record["samples"], record["steps"]),
+                                 ("synthetic01", "3", "60"))
+                self.assertEqual((record["distance_km"], record["speed_outliers"]), ("0.111", "1"))
                 geojson = client.get(downloads + "geojson", auth=credentials)
                 self.assertEqual(geojson.status_code, 200)
                 features = geojson.json()["features"]
                 self.assertEqual(len(features), 1)
                 self.assertEqual(features[0]["geometry"]["coordinates"], [[0, 0], [0, 0.001]])
+
+    def test_artifact_staging_quota_is_concurrent_and_stale_finish_creates_no_artifact(self):
+        from researchhub.artifacts import StorageQuotaExceeded, usage
+        from researchhub.models import artifacts
+        from researchhub.queue import now_ms, recover
+        from researchhub.registry import register, stage_upload
+
+        payload = b"value\n1\n2\n"
+        with self.engine.begin() as conn:
+            conn.execute(projects.update().values(storage_quota_bytes=len(payload) * 2))
+            data = register(conn, "project", "requester", "Concurrent sample")
+
+        def upload_one(index):
+            try:
+                with self.engine.begin() as conn:
+                    return stage_upload(conn, "project", data, "requester", payload, now_ms(conn), str(index))[0]
+            except StorageQuotaExceeded:
+                return None
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            admitted = list(pool.map(upload_one, range(9)))
+        self.assertEqual(len([item for item in admitted if item]), 2)
+        index = next(index for index, item in enumerate(admitted) if item)
+        self.assertEqual(upload_one(index)["id"], admitted[index]["id"])
+        with self.engine.begin() as conn:
+            self.assertEqual(usage(conn, "project"), 2 * len(payload))
+            job = submit(conn, "project", "for-fencing", "summary@1", {}, timeout_ms=1)
+            lease = claim(conn, "first")
+        time.sleep(0.02)
+        with self.engine.begin() as conn:
+            self.assertEqual(recover(conn), 1)
+            self.assertFalse(finish(conn, job["id"], lease["token"], result={"ok": True}))
+            self.assertEqual(conn.execute(select(func.count()).select_from(artifacts).where(
+                artifacts.c.job_id == job["id"],
+            )).scalar_one(), 0)
+
+    @unittest.skipUnless(os.getenv("RESEARCHHUB_TEST_S3_ENDPOINT"), "Requires a disposable S3-compatible server")
+    def test_s3_reconciles_rolled_back_metadata_and_preserves_referenced_objects(self):
+        from researchhub.artifacts import ArtifactUnavailable, cleanup_orphans, get_bytes, initialize_bucket, publish
+        from researchhub.models import artifacts
+        from researchhub.queue import now_ms
+        from researchhub.registry import register, stage_upload
+        from researchhub.storage import configured_s3
+
+        bucket = "rh-test-" + uuid4().hex
+        endpoint = os.environ["RESEARCHHUB_TEST_S3_ENDPOINT"]
+        payload = b"value\n1\n2\n"
+        with patch.dict(os.environ, {"RESEARCHHUB_S3_BUCKET": bucket, "RESEARCHHUB_S3_ENDPOINT": endpoint}):
+            storage = configured_s3()
+            initialize_bucket(storage)
+            try:
+                with self.engine.begin() as conn:
+                    dataset = register(conn, "project", "requester", "S3 sample")
+                    version, _ = stage_upload(conn, "project", dataset, "requester", payload, now_ms(conn), "s3")
+                    artifact_id = version["artifact_id"]
+                self.assertFalse(storage.exists(artifact_id))
+                with patch.dict(os.environ, {"RESEARCHHUB_S3_ENDPOINT": "http://127.0.0.1:1"}):
+                    with self.engine.begin() as conn:
+                        self.assertEqual(publish(conn, configured_s3(), now_ms(conn), artifact_id), "PENDING")
+                with self.assertRaisesRegex(RuntimeError, "simulate database rollback"):
+                    with self.engine.begin() as conn:
+                        self.assertEqual(publish(conn, storage, now_ms(conn) + 2000, artifact_id), "AVAILABLE")
+                        raise RuntimeError("simulate database rollback")
+                self.assertTrue(storage.exists(artifact_id))
+                self.assertEqual(storage.metadata(artifact_id)["checksum"], hashlib.sha256(payload).hexdigest())
+                with self.engine.begin() as conn:
+                    self.assertEqual(publish(conn, storage, now_ms(conn) + 2000, artifact_id), "AVAILABLE")
+                    record = conn.execute(select(artifacts).where(artifacts.c.id == artifact_id)).mappings().one()
+                    self.assertEqual(get_bytes(storage, record), payload)
+                    orphan = str(uuid4())
+                    storage.put(orphan, b"orphan")
+                    self.assertEqual(cleanup_orphans(conn, storage, now_ms(conn) + 2000), 1)
+                    self.assertFalse(storage.exists(orphan))
+                    self.assertTrue(storage.exists(artifact_id))
+                    storage.delete(artifact_id)
+                    with self.assertRaises(ArtifactUnavailable):
+                        get_bytes(storage, record)
+            finally:
+                for key in storage.list_older(2**60):
+                    storage.delete(key)
+                storage.client.delete_bucket(Bucket=bucket)
 
     def test_v1_schema_upgrades_and_preserves_existing_workflow(self):
         from alembic import command

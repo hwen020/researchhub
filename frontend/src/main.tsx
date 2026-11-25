@@ -6,8 +6,9 @@ type Project = { id: string, name: string, organization: string, role: string }
 type Job = { id: string, state: string, plugin: string, attempt: number, result: unknown, wait_reason?: string }
 type Workflow = { id: string, state: string, version_id?: string, parent_id?: string,
   dependencies: Record<string, string[]>, nodes: Record<string, { state: string, reused_from?: string }> }
-type Quota = { max_concurrent: number, max_queued: number, quota_cpu: number, quota_memory: number }
-type Resources = { quota: Quota, usage: { active: number, queued: number, cpu_units: number, memory_units: number } }
+type Quota = { max_concurrent: number, max_queued: number, quota_cpu: number, quota_memory: number, storage_quota_bytes: number }
+type Resources = { quota: Quota, usage: { active: number, queued: number, cpu_units: number, memory_units: number }, storage_bytes: number }
+type Artifact = { id: string, kind: string, version: number, state: string, size: number, checksum: string }
 type Worker = { id: string, capabilities: string[], cpu_units: number, memory_units: number }
 type Template = { id: string, name: string }
 type WorkflowVersion = { id: string, version: number, checksum: string }
@@ -19,7 +20,7 @@ type Funding = {
   budget: { limit: number, spent: number },
   requests: { id: string, purpose: string, amount: number, state: string }[],
 }
-const sections = ['Overview', 'Jobs', 'Workflows', 'Resources', 'Datasets', 'Funding', 'Members', 'Audit', 'System health', 'Administration'] as const
+const sections = ['Overview', 'Jobs', 'Workflows', 'Resources', 'Datasets', 'Artifacts', 'Funding', 'Members', 'Audit', 'System health', 'Administration'] as const
 type Section = typeof sections[number]
 
 function Workspace() {
@@ -30,6 +31,7 @@ function Workspace() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [workflows, setWorkflows] = useState<Workflow[]>([])
   const [resources, setResources] = useState<Resources | null>(null)
+  const [artifactList, setArtifactList] = useState<Artifact[]>([])
   const [workerList, setWorkerList] = useState<Worker[]>([])
   const [templates, setTemplates] = useState<Template[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState('')
@@ -104,6 +106,10 @@ function Workspace() {
           setWorkerList(online)
         }
       }
+      if (section === 'Artifacts') {
+        const list = await api<Artifact[]>(base + '/artifacts')
+        if (refreshId === refreshSequence.current) setArtifactList(list)
+      }
       if (section === 'Datasets') {
         const currentDatasets = await api<Dataset[]>(base + '/datasets')
         if (refreshId === refreshSequence.current) setDatasets(currentDatasets)
@@ -127,6 +133,7 @@ function Workspace() {
     setWorkflows([])
     setDatasets([])
     setResources(null)
+    setArtifactList([])
     setFunding(null)
     if (token) void refresh()
   }, [token, projectId, section])
@@ -271,6 +278,7 @@ function Workspace() {
               <div><dt>Outstanding jobs</dt><dd>{resources.usage.active + resources.usage.queued} / {resources.quota.max_queued}</dd></div>
               <div><dt>Logical CPU units</dt><dd>{resources.usage.cpu_units} / {resources.quota.quota_cpu}</dd></div>
               <div><dt>Logical memory units</dt><dd>{resources.usage.memory_units} / {resources.quota.quota_memory}</dd></div>
+              <div><dt>Artifact storage bytes</dt><dd>{resources.storage_bytes} / {resources.quota.storage_quota_bytes}</dd></div>
             </dl>
             {isAdmin && <form key={JSON.stringify(resources.quota)} className="quota-form" onSubmit={(event) => {
               event.preventDefault()
@@ -282,7 +290,8 @@ function Workspace() {
               })
             }}>
               {([['max_concurrent', 'Concurrent limit'], ['max_queued', 'Outstanding limit'],
-                ['quota_cpu', 'Logical CPU limit'], ['quota_memory', 'Logical memory limit']] as const).map(([key, label]) =>
+                ['quota_cpu', 'Logical CPU limit'], ['quota_memory', 'Logical memory limit'],
+                ['storage_quota_bytes', 'Storage limit (bytes)']] as const).map(([key, label]) =>
                 <label key={key}>{label}<input name={key} type="number" min="1"
                   defaultValue={resources.quota[key]} required /></label>)}
               <button className="primary">Save quota</button>
@@ -364,6 +373,19 @@ function Workspace() {
             </article>
           })}
         </>}
+        {section === 'Artifacts' && <section className="panel table-wrap">
+          <h2>Scientific artifact registry</h2>
+          {artifactList.length === 0 ? <p>No managed artifacts in this project.</p> :
+            <table><thead><tr><th scope="col">Artifact</th><th scope="col">Status</th><th scope="col">Bytes</th><th scope="col">Actions</th></tr></thead>
+              <tbody>{artifactList.map((artifact) => <tr key={artifact.id}>
+                <td>{artifact.kind === 'DATASET' ? 'Dataset v' + artifact.version : 'Result snapshot'}
+                  <small className="wait-reason" title={artifact.checksum}>{artifact.checksum.slice(0, 12)}</small></td>
+                <td>{artifact.state}</td><td>{artifact.size}</td>
+                <td>{artifact.state === 'AVAILABLE' && <button onClick={() => void run(() => download(
+                  projectPath + '/artifacts/' + artifact.id + '/download', artifact.kind === 'DATASET' ? 'dataset.csv' : 'result.json',
+                ))}>Download</button>}</td>
+              </tr>)}</tbody></table>}
+        </section>}
         {section === 'Datasets' && <section className="panel"><ul>{datasets.map((dataset) => <li key={dataset.id}>
           <button onClick={() => void run(async () => setDetails(await api('/projects/' + projectId + '/datasets/' + dataset.id + '/versions')))}>{dataset.name}</button>
         </li>)}</ul>{datasets.length === 0 && <p>No datasets registered in this project.</p>}</section>}

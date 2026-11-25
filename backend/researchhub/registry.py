@@ -5,9 +5,10 @@ from uuid import uuid4
 
 from sqlalchemy import func, select
 
-from .models import datasets, versions
+from .artifacts import enqueue, get_bytes, quota_lock
+from .models import artifacts, datasets, versions
 from .mobility import MAX_ROWS
-from .storage import checksum
+from .storage import checksum, managed_storage
 
 MAX_UPLOAD = 1024 * 1024
 
@@ -20,7 +21,7 @@ def register(connection, project_id, owner_id, name):
     return dataset_id
 
 
-def upload(connection, storage, project_id, dataset_id, data):
+def validate_csv(data):
     if not 0 < len(data) <= MAX_UPLOAD:
         raise ValueError("CSV must contain at most one MiB")
     try:
@@ -35,6 +36,7 @@ def upload(connection, storage, project_id, dataset_id, data):
     except (csv.Error, UnicodeDecodeError) as exc:
         raise ValueError("Invalid UTF-8 CSV") from exc
 
+def allocate_version(connection, project_id, dataset_id, data):
     dataset = connection.execute(select(datasets.c.id).where(
         datasets.c.id == dataset_id, datasets.c.project_id == project_id,
     ).with_for_update()).scalar_one_or_none()
@@ -46,8 +48,35 @@ def upload(connection, storage, project_id, dataset_id, data):
     version = dict(id=str(uuid4()), dataset_id=dataset_id, version=(latest or 0) + 1,
                    checksum=checksum(data), size=len(data))
     connection.execute(versions.insert().values(**version))
-    storage.put(version["id"], data)
     return version
+
+
+def upload(connection, storage, project_id, dataset_id, data):
+    validate_csv(data)
+    version = allocate_version(connection, project_id, dataset_id, data)
+    storage.put(version["id"], data, "text/csv")
+    return version
+
+
+def stage_upload(connection, project_id, dataset_id, owner_id, data, timestamp, key=None):
+    validate_csv(data)
+    quota_lock(connection, project_id)
+    if key is not None:
+        existing = connection.execute(select(versions, artifacts.c.id.label("artifact_id"),
+                                             artifacts.c.state).join(
+            artifacts, artifacts.c.dataset_version_id == versions.c.id,
+        ).where(artifacts.c.project_id == project_id, artifacts.c.request_key == key)).mappings().one_or_none()
+        if existing is not None:
+            if existing["dataset_id"] != dataset_id or existing["checksum"] != checksum(data):
+                from .queue import IdempotencyConflict
+
+                raise IdempotencyConflict("Idempotency key already used with a different dataset or content")
+            return dict(existing), False
+    version = allocate_version(connection, project_id, dataset_id, data)
+    artifact_id = enqueue(connection, project_id, data, timestamp, kind="DATASET", content_type="text/csv",
+                          version=version["version"], dataset_version_id=version["id"], owner_id=owner_id,
+                          request_key=key)
+    return dict(version, artifact_id=artifact_id, state="PENDING"), True
 
 
 def read_version(connection, storage, project_id, dataset_id, version):
@@ -57,7 +86,10 @@ def read_version(connection, storage, project_id, dataset_id, version):
     )).mappings().one_or_none()
     if row is None:
         raise LookupError("Dataset version not found")
-    data = storage.read(row["id"])
+    artifact = connection.execute(select(artifacts).where(
+        artifacts.c.project_id == project_id, artifacts.c.dataset_version_id == row["id"],
+    )).mappings().one_or_none()
+    data = get_bytes(managed_storage(storage), artifact) if artifact else storage.read(row["id"])
     if len(data) != row["size"] or checksum(data) != row["checksum"]:
         raise OSError("Dataset integrity check failed")
     return row, data

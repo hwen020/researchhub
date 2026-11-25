@@ -1,6 +1,6 @@
 from sqlalchemy import (
     JSON, BigInteger, CheckConstraint, Column, ForeignKey, Index, Integer,
-    MetaData, String, Table, UniqueConstraint,
+    LargeBinary, MetaData, String, Table, UniqueConstraint,
 )
 
 metadata = MetaData()
@@ -19,6 +19,7 @@ projects = Table(
     Column("quota_cpu", Integer, nullable=False, server_default="32"),
     Column("quota_memory", Integer, nullable=False, server_default="32"),
     Column("last_dispatch", BigInteger, nullable=False, server_default="0"),
+    Column("storage_quota_bytes", BigInteger, nullable=False, server_default="104857600"),
     CheckConstraint("max_concurrent > 0 AND max_queued > 0 AND quota_cpu > 0 AND quota_memory > 0",
                     name="projects_positive_quota"),
 )
@@ -172,6 +173,37 @@ versions = Table(
     Column("size", Integer, nullable=False),
     UniqueConstraint("dataset_id", "version"),
 )
+artifacts = Table(
+    "artifacts", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("project_id", ForeignKey("projects.id"), nullable=False),
+    Column("owner_id", ForeignKey("users.id")),
+    Column("dataset_version_id", ForeignKey("dataset_versions.id"), unique=True),
+    Column("job_id", ForeignKey("jobs.id"), unique=True),
+    Column("request_key", String(128)),
+    Column("kind", String(16), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("checksum", String(64), nullable=False),
+    Column("size", BigInteger, nullable=False),
+    Column("content_type", String(100), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("payload", LargeBinary),
+    Column("created_at", BigInteger, nullable=False),
+    Column("next_attempt_at", BigInteger, nullable=False),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("last_error", String(64)),
+    Column("publish_ms", BigInteger),
+    UniqueConstraint("project_id", "request_key"),
+    CheckConstraint("size > 0 AND version > 0", name="artifact_size_version"),
+    CheckConstraint("state IN ('PENDING','AVAILABLE','FAILED')", name="artifact_state"),
+    CheckConstraint(
+        "(kind = 'DATASET' AND dataset_version_id IS NOT NULL AND job_id IS NULL) OR "
+        "(kind = 'RESULT' AND job_id IS NOT NULL AND dataset_version_id IS NULL)",
+        name="artifact_reference_kind",
+    ),
+)
+Index("artifacts_publish", artifacts.c.state, artifacts.c.next_attempt_at, artifacts.c.id)
+Index("artifacts_project", artifacts.c.project_id, artifacts.c.created_at)
 audit = Table(
     "audit_events", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

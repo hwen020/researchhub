@@ -50,6 +50,8 @@ services:
   scheduler:
     <<: *backend
     command: ["python", "-m", "researchhub.scheduler"]
+    volumes:
+      - artifacts:/artifacts
     depends_on:
       schema:
         condition: service_completed_successfully

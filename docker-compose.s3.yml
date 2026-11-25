@@ -1,0 +1,38 @@
+x-s3: &s3
+  RESEARCHHUB_STORAGE_BACKEND: s3
+  RESEARCHHUB_S3_ENDPOINT: http://object-store:7070
+  RESEARCHHUB_S3_BUCKET: researchhub-artifacts
+  RESEARCHHUB_S3_ACCESS_KEY: ${RESEARCHHUB_S3_ACCESS_KEY:?set a local S3 access key}
+  RESEARCHHUB_S3_SECRET_KEY: ${RESEARCHHUB_S3_SECRET_KEY:?set a local S3 secret key}
+
+services:
+  object-store:
+    image: ghcr.io/versity/versitygw:v1.7.0
+    profiles: [object-storage]
+    command: ["--port", ":7070", "posix", "/data"]
+    environment:
+      ROOT_ACCESS_KEY: ${RESEARCHHUB_S3_ACCESS_KEY:?set a local S3 access key}
+      ROOT_SECRET_KEY: ${RESEARCHHUB_S3_SECRET_KEY:?set a local S3 secret key}
+    volumes:
+      - objects:/data
+  artifact-bucket:
+    build: ./backend
+    profiles: [object-storage]
+    command: ["python", "-m", "researchhub.artifacts", "init-bucket"]
+    environment: *s3
+    depends_on:
+      object-store:
+        condition: service_started
+  api:
+    environment: *s3
+    depends_on:
+      artifact-bucket:
+        condition: service_completed_successfully
+  scheduler:
+    environment: *s3
+    depends_on:
+      artifact-bucket:
+        condition: service_completed_successfully
+
+volumes:
+  objects:

@@ -12,6 +12,7 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from .artifacts import StorageQuotaExceeded, enqueue
 from .models import events, jobs
 from .resource_policy import ACTIVE, READY, admit, candidate, dispatch_project, requirements, scheduling_lock
 
@@ -125,7 +126,7 @@ def heartbeat(connection, job_id, token):
     return job["state"]
 
 
-def transition(connection, job, state, reason, timestamp, result=None):
+def transition(connection, job, state, reason, timestamp, result=None, artifact_id=None):
     values = {"state": state}
     if state != "CANCEL_REQUESTED":
         values.update(worker=None, lease_until=None, deadline=None, token=None)
@@ -134,12 +135,14 @@ def transition(connection, job, state, reason, timestamp, result=None):
     if state == "SUCCEEDED":
         values["result"] = result
         values["manifest"] = manifest(job, result, timestamp)
+        if artifact_id is not None:
+            values["manifest"]["output_artifact_id"] = artifact_id
     connection.execute(jobs.update().where(jobs.c.id == job["id"]).values(**values))
     record(connection, job, state, reason, timestamp)
 
 
 def manifest(job, result, timestamp):
-    payload = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    payload = encode_result(result)
     runtime = {"python": platform.python_version()}
     if job["plugin"] == "age-association@1" or job["plugin"].startswith("genomics-"):
         for dependency in ("numpy", "pandas", "scipy"):
@@ -154,8 +157,12 @@ def manifest(job, result, timestamp):
         "inputs": job["parameters"], "dataset": job["provenance"],
         "code_version": os.getenv("RESEARCHHUB_CODE_VERSION") or source_version(),
         "runtime": runtime, "completed_at_ms": timestamp,
-        "output_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+        "output_sha256": hashlib.sha256(payload).hexdigest(),
     }
+
+
+def encode_result(result):
+    return json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 @lru_cache(maxsize=1)
@@ -198,7 +205,18 @@ def finish(connection, job_id, token, *, result=None, error=None, retryable=Fals
     elif error is not None:
         fail(connection, job, error, timestamp, retryable)
     else:
-        transition(connection, job, "SUCCEEDED", "result_committed", timestamp, result)
+        artifact_id = None
+        if os.getenv("RESEARCHHUB_DEMO_MODE") != "1":
+            try:
+                artifact_id = enqueue(connection, job["project_id"], encode_result(result), timestamp,
+                                      kind="RESULT", content_type="application/json", job_id=job_id)
+            except StorageQuotaExceeded:
+                fail(connection, job, "artifact_quota_exceeded", timestamp, False)
+                return True
+            except ValueError:
+                fail(connection, job, "invalid_artifact_output", timestamp, False)
+                return True
+        transition(connection, job, "SUCCEEDED", "result_committed", timestamp, result, artifact_id)
     return True
 
 

@@ -11,4 +11,8 @@ Phases 0 through 3 were exercised using Python 3.12 in an existing ResearchHub L
 | Genomics | A fixed read-only guest profile seeded a dataset-backed DAG. Two independent workers and a scheduler ran against PostgreSQL. JSON, CSV and a versioned run manifest downloaded through the authorized API. Prior fixture administrator credentials were rejected. |
 | Wearable mobility | Two workers and a scheduler completed all five stages. The synthetic CSV reported three samples, 60 steps, 0.111 km of screened distance and one speed outlier. The GeoJSON route contained the first two points. The manifest linked the dataset and upstream output hashes. |
 
-The live v1 readiness endpoint returned HTTP 200 during baseline inspection. Public genomics, authenticated Render settings, v2 cloud CI, browser checks against the v2 snapshot, object storage and v2 benchmarks are tracked independently in the acceptance matrix.
+The first v2 checkpoint ran on an isolated Compose stack with PostgreSQL, API, scheduler, frontend and two Worker containers. Both 390 px Edge tests passed. All three cloud CI jobs passed for the same checkpoint. [GitHub Actions 45544377608](https://github.com/hwen020/researchhub/actions/runs/45544377608).
+
+The storage snapshot passed 34 default PostgreSQL regressions with the S3-only case skipped in that run. A separate invocation passed that case using a real VersityGW v1.7.0 process. The server returned 412 on a replay after database rollback. The test verified exact bytes, pending recovery after connection refusal, old unreferenced object removal and unavailable referenced bytes.
+
+The live v1 readiness endpoint returned HTTP 200 during baseline inspection. Public genomics, authenticated Render settings and v2 benchmarks are tracked in the acceptance matrix.

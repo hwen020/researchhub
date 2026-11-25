@@ -25,6 +25,7 @@ Export a new bootstrap username and password in the invoking shell before runnin
 - [Resource scheduling](docs/resource-scheduler.md) and [fairness](docs/fair-scheduling.md)
 - [Conditional workflows](docs/advanced-workflow-engine.md), [versions and schedules](docs/workflow-versioning.md) and [provenance](docs/research-plugin-interface.md)
 - [Wearable mobility methods and exports](docs/mobility-workflow.md)
+- [Artifact storage](docs/artifact-storage.md) and [publication consistency](docs/storage-consistency.md)
 - [v2 test evidence](docs/test-report-v2.md) and [acceptance matrix](docs/v2-acceptance-matrix.md)
 
 ## Release verification status

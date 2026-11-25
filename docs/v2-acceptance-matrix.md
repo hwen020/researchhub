@@ -9,7 +9,8 @@
 | Research | Five-stage Genomics and Mobility DAGs finish with dataset lineage and authorized exports | Acceptance in final infrastructure profile |
 | Migrations | Populated 0006 schema upgraded to 0008 with no drift and retained legacy workflow execution | Final current-head and downgrade validation |
 | Observability | Queue saturation, project usage, worker availability and existing event metrics | Correlation, tracing, monitoring and new benchmarks |
-| Storage, notifications, backends | Local files and independent subprocess worker remain operational | S3 and failure injection, persistent notifications, unified backend contract |
+| Object storage | Local and VersityGW S3. Real conditional PUT, connection failure, PostgreSQL publication rollback, retry, missing-object detection and orphan cleanup verified | Final infrastructure profile and full service stop/start test |
+| Notifications and backends | Independent subprocess workers remain operational | Persistent notifications and unified backend contract |
 | Release | TypeScript and production bundle passed locally | Public branch CI, final privacy and license audit, v2 release and Render update |
 
 [Local test evidence](test-report-v2.md)
