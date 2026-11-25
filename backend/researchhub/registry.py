@@ -1,10 +1,12 @@
 import csv
 import io
+from itertools import islice
 from uuid import uuid4
 
 from sqlalchemy import func, select
 
 from .models import datasets, versions
+from .mobility import MAX_ROWS
 from .storage import checksum
 
 MAX_UPLOAD = 1024 * 1024
@@ -80,6 +82,8 @@ def compute_inputs(connection, storage, project_id, dataset_id, version, plugin)
             for name in expression:
                 expression[name].append(float(record[name]))
         parameters = {"ages": ages, "expression": expression}
+    elif plugin == "mobility-validate@1":
+        parameters = {"rows": list(islice(reader, MAX_ROWS + 1))}
     else:
         raise ValueError("Dataset columns do not match the plugin")
     return parameters, {"id": dataset_id, "version": row["version"], "sha256": row["checksum"]}

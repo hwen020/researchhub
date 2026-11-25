@@ -5,6 +5,8 @@ from typing import Dict, List
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import mobility
+
 
 class SummaryInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -48,19 +50,60 @@ class AgingInput(BaseModel):
         return self
 
 
-def aging_associations(parameters):
+def aging_dataset(parameters):
     import pandas as pd
 
+    data = AgingInput.model_validate(parameters).values()
+    return SimpleNamespace(metadata=pd.DataFrame({"age": data.ages}),
+                           expression=pd.DataFrame.from_dict(data.expression, orient="index"))
+
+
+def aging_associations(parameters):
     from .aging_statistics import age_association
 
-    data = AgingInput.model_validate(parameters).values()
-    metadata = pd.DataFrame({"age": data.ages})
-    expression = pd.DataFrame.from_dict(data.expression, orient="index")
-    results = age_association(SimpleNamespace(metadata=metadata, expression=expression))
+    results = age_association(aging_dataset(parameters))
     return {"associations": results.to_dict(orient="records")}
 
 
-PLUGINS = {"summary@1": summarize, "age-association@1": aging_associations}
+def genomics_validate(parameters):
+    return AgingInput.model_validate(parameters).values().model_dump()
+
+
+def genomics_preprocess(parameters):
+    data = AgingInput.model_validate(parameters).values()
+    order = sorted(range(len(data.ages)), key=data.ages.__getitem__)
+    return {"ages": [data.ages[index] for index in order],
+            "expression": {gene: [values[index] for index in order] for gene, values in data.expression.items()}}
+
+
+def genomics_associate(parameters):
+    from .aging_statistics import age_association_raw
+
+    return {"associations": age_association_raw(aging_dataset(parameters)).to_dict(orient="records")}
+
+
+def genomics_correct(parameters):
+    import pandas as pd
+
+    from .aging_statistics import adjust_associations
+
+    return {"associations": adjust_associations(pd.DataFrame(parameters["associations"])).to_dict(orient="records")}
+
+
+def genomics_report(parameters):
+    return dict(parameters, method="Spearman correlation with Benjamini-Hochberg adjustment",
+                limitations="Exploratory analysis without covariate adjustment")
+
+
+PLUGINS = {
+    "summary@1": summarize, "age-association@1": aging_associations,
+    "genomics-validate@1": genomics_validate, "genomics-preprocess@1": genomics_preprocess,
+    "genomics-associate@1": genomics_associate, "genomics-correct@1": genomics_correct,
+    "genomics-report@1": genomics_report,
+    "mobility-validate@1": mobility.validate_observations, "mobility-temporal@1": mobility.temporal_processing,
+    "mobility-analyze@1": mobility.analyze, "mobility-spatial@1": mobility.spatial_aggregation,
+    "mobility-report@1": mobility.report,
+}
 INPUTS = {"summary@1": SummaryInput, "age-association@1": AgingInput}
 
 

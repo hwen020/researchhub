@@ -1,5 +1,10 @@
 # Progress
 
+- Isolated v2 work on `feature/researchhub-v2`. Baseline GitHub Actions run `45531997808` passed, and the public readiness endpoint returned HTTP 200.
+- Added migration 0007, transactional resource admission, persisted project rotation, aging, worker capability matching and queue saturation reporting.
+- Added migration 0008, immutable workflow templates, conditional dependencies, lineage, local reruns and persistent schedules.
+- Exercised the fixed Genomics demo and Wearable Mobility exports with independent scheduler and worker processes. The local test checkpoint passed 33 tests and 3 subtests.
+
 - Resumed from handoff checkpoint `4df71f9`; committed Edge/mobile fixes as `c836a41`, administration as `5174185`, rate limits as `cd0df3c`, metrics as `e7119f9`, recovery as `dd0df55`, and full-regression fixes as `0286174`.
 - Added incremental migrations for run manifests, audit and worker heartbeats.
 - Native PostgreSQL tests exercise concurrent claims, stale results, worker process loss, funding consistency, API isolation and dataset provenance.

@@ -1,0 +1,14 @@
+# v2 development acceptance
+
+Phases 0 through 3 were exercised using Python 3.12 in an existing ResearchHub Linux image and PostgreSQL 16 in the dedicated acceptance stack. Tests created isolated PostgreSQL schemas. The backend snapshot reported **33 passed and 3 subtests passed**. Warnings came from Starlette TestClient and Alembic configuration deprecations. TypeScript and the Vite production build passed separately.
+
+| Area | Evidence |
+| --- | --- |
+| Scheduling | Concurrent reservations respected project limits, and three queued projects received leases. PostgreSQL tests exercised priority aging, capability and resource matching, saturated admission and idempotent replay. |
+| Recovery | Existing PostgreSQL regressions exercised abrupt worker termination, a second attempt, fencing, an API restart and database connectivity interruption. |
+| Advanced workflows | Parallel roots, cycles, conditions, finalization, immutable versions, reused upstream results, scheduled trigger deduplication, cancellation, snapshot migration and lineage. |
+| Migrations | A populated v1 schema upgraded from 0006 to 0008. The old workflow stayed executable and Alembic reported no model drift. |
+| Genomics | A fixed read-only guest profile seeded a dataset-backed DAG. Two independent workers and a scheduler ran against PostgreSQL. JSON, CSV and a versioned run manifest downloaded through the authorized API. Prior fixture administrator credentials were rejected. |
+| Wearable mobility | Two workers and a scheduler completed all five stages. The synthetic CSV reported three samples, 60 steps, 0.111 km of screened distance and one speed outlier. The GeoJSON route contained the first two points. The manifest linked the dataset and upstream output hashes. |
+
+The live v1 readiness endpoint returned HTTP 200 during baseline inspection. Public genomics, authenticated Render settings, v2 cloud CI, browser checks against the v2 snapshot, object storage and v2 benchmarks are tracked independently in the acceptance matrix.

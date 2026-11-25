@@ -19,7 +19,7 @@ COPY backend/researchhub ./researchhub
 COPY backend/migrations ./migrations
 COPY demo/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=frontend /app/dist /usr/share/nginx/html
-COPY scripts/seed_browser_fixture.py ./seed_browser_fixture.py
+
 COPY demo/start.sh ./start.sh
 RUN chmod +x ./start.sh
 

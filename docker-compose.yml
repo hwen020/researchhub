@@ -1,6 +1,6 @@
 x-backend: &backend
   build: ./backend
-  environment:
+  environment: &backend-env
     DATABASE_URL: postgresql+psycopg://researchhub:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres/researchhub
     RESEARCHHUB_STORAGE: /artifacts
   depends_on:
@@ -37,9 +37,12 @@ services:
       timeout: 3s
       retries: 30
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${RESEARCHHUB_API_PORT:-8000}:8000"
   worker:
     <<: *backend
+    environment:
+      <<: *backend-env
+      RESEARCHHUB_WORKER_CAPABILITIES: GENERAL,GENOMICS,GEOSPATIAL
     command: ["python", "-m", "researchhub.worker"]
     depends_on:
       schema:
@@ -56,7 +59,7 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:${RESEARCHHUB_FRONTEND_PORT:-8080}:80"
 
 volumes:
   database:

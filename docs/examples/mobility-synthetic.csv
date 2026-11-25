@@ -1,0 +1,4 @@
+participant_id,timestamp_utc,latitude,longitude,steps
+synthetic01,2025-01-01T00:00:00Z,0,0,10
+synthetic01,2025-01-01T00:10:00Z,0.001,0,20
+synthetic01,2025-01-01T00:11:00Z,2,0,30

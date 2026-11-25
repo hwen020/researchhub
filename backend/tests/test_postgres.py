@@ -22,8 +22,11 @@ from researchhub.finance import decide, request_funds
 from researchhub.auth import hash_password
 from researchhub.models import api_rate_limits, budgets, events, jobs, memberships, metadata, organizations, projects, system_audit, users
 from researchhub.queue import cancel, claim, finish, submit
+from researchhub.resource_policy import AGING_MS, QueueFull, project_usage
 from researchhub.models import workflow_runs
-from researchhub.workflows import start
+from researchhub.provenance import manifest
+from researchhub.workflow_versions import create_schedule, publish, start_version, trigger_due
+from researchhub.workflows import cancel_run, get_run, reconcile, rerun, start
 
 URL = os.environ.get("RESEARCHHUB_TEST_DATABASE")
 
@@ -69,6 +72,299 @@ class PostgresIntegration(unittest.TestCase):
             self.assertEqual(len(set(pool.map(enqueue, range(12)))), 1)
             leases = [job for job in pool.map(reserve, range(12)) if job]
         self.assertEqual(len(leases), 1)
+
+    def test_scheduler_rotates_three_projects_and_reserves_concurrent_capacity(self):
+        with self.engine.begin() as conn:
+            for project in ("second", "third"):
+                conn.execute(projects.insert().values(
+                    id=project, organization_id="org", name=project, max_concurrent=1,
+                ))
+            conn.execute(projects.update().where(projects.c.id == "project").values(
+                max_concurrent=1, quota_cpu=2,
+            ))
+            for project in ("project", "second", "third"):
+                for index in range(4):
+                    submit(conn, project, str(index), "summary@1", {}, cpu_units=2)
+
+        def reserve(index):
+            with self.engine.begin() as conn:
+                return claim(conn, "worker-" + str(index))
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            first_round = [job for job in pool.map(reserve, range(8)) if job]
+        self.assertCountEqual([job["project_id"] for job in first_round], ["project", "second", "third"])
+        with self.engine.begin() as conn:
+            for job in first_round:
+                self.assertEqual(project_usage(conn, job["project_id"])["cpu_units"], 2)
+                cancel(conn, job["project_id"], job["id"])
+                self.assertEqual(project_usage(conn, job["project_id"])["active"], 1)
+                self.assertTrue(finish(conn, job["id"], job["token"]))
+                self.assertEqual(project_usage(conn, job["project_id"])["active"], 0)
+        self.assertCountEqual([reserve(index)["project_id"] for index in range(3)],
+                              ["project", "second", "third"])
+
+    def test_scheduler_aging_and_capability_match(self):
+        with self.engine.begin() as conn:
+            old = submit(conn, "project", "old", "summary@1", {})
+            urgent = submit(conn, "project", "urgent", "summary@1", {}, priority=10)
+            genomic = submit(conn, "project", "genomic", "age-association@1", {}, memory_units=4)
+            worker = claim(conn, "general", capabilities=("GENERAL",))
+            self.assertEqual(worker["id"], urgent["id"])
+            submit(conn, "project", "new-urgent", "summary@1", {}, priority=10)
+            conn.execute(jobs.update().where(jobs.c.id == old["id"]).values(
+                created_at=old["created_at"] - 10 * AGING_MS,
+            ))
+            self.assertEqual(claim(conn, "general", capabilities=("GENERAL",))["id"], old["id"])
+            self.assertIsNone(claim(conn, "small", capabilities=("GENOMICS",), memory_units=3))
+            self.assertEqual(claim(conn, "genomics", capabilities=("GENOMICS",), memory_units=4)["id"],
+                             genomic["id"])
+
+    def test_scheduler_backpressure_is_serial_and_preserves_idempotency(self):
+        with self.engine.begin() as conn:
+            conn.execute(projects.update().values(max_queued=3))
+
+        def enqueue(index):
+            try:
+                with self.engine.begin() as conn:
+                    return submit(conn, "project", str(index), "summary@1", {})["id"]
+            except QueueFull:
+                return None
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            admitted = list(pool.map(enqueue, range(16)))
+        self.assertEqual(len([job for job in admitted if job]), 3)
+        index = next(i for i, job in enumerate(admitted) if job)
+        self.assertEqual(enqueue(index), admitted[index])
+        with self.engine.begin() as conn:
+            lease = claim(conn, "worker")
+            with self.assertRaises(QueueFull):
+                submit(conn, "project", "extra", "summary@1", {})
+            self.assertTrue(finish(conn, lease["id"], lease["token"], result={}))
+            self.assertIsNotNone(submit(conn, "project", "extra", "summary@1", {}))
+
+    def test_demo_guest_reads_only_fixed_genomics_workflow(self):
+        from fastapi.testclient import TestClient
+        from researchhub import api, demo_fixture
+
+        password = "synthetic-demo-fixture-only"
+        with tempfile.TemporaryDirectory() as storage, patch.dict(os.environ, {
+            "DATABASE_URL": self.url.render_as_string(hide_password=False),
+            "RESEARCHHUB_STORAGE": storage,
+            "RESEARCHHUB_DEMO_MODE": "1",
+            "RESEARCHHUB_DEMO_PASSWORD": password,
+        }), patch.object(api, "engine", self.engine):
+            with self.engine.begin() as conn:
+                conn.execute(users.insert().values(
+                    id="legacy-admin", username="fixture-admin",
+                    password_hash=hash_password(password), platform_admin=1,
+                ))
+            demo_fixture.seed()
+            demo_fixture.seed()
+            env = os.environ.copy()
+            processes = []
+            try:
+                for program in ("scheduler", "worker", "worker"):
+                    processes.append(subprocess.Popen(
+                        [sys.executable, "-m", "researchhub." + program], env=env,
+                        stdout=subprocess.DEVNULL,
+                    ))
+                guest = ("demo-guest", password)
+                project = "/projects/" + demo_fixture.PROJECT_ID
+                with TestClient(api.app) as client:
+                    self.assertEqual(client.get("/projects", auth=("fixture-admin", password)).status_code, 401)
+                    self.assertEqual(len(client.get("/projects", auth=guest).json()), 1)
+                    self.assertEqual(client.post(project + "/jobs", auth=guest,
+                                                 headers={"Idempotency-Key": "guest"},
+                                                 json={"plugin": "summary@1", "parameters": {}}).status_code, 403)
+                    self.assertEqual(client.post(project + "/datasets", auth=guest,
+                                                 json={"name": "private"}).status_code, 403)
+                    self.assertEqual(client.get("/admin/workers", auth=guest).status_code, 403)
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        runs = client.get(project + "/workflows", auth=guest).json()
+                        if runs[0]["state"] != "RUNNING":
+                            break
+                        time.sleep(0.2)
+                    self.assertEqual(runs[0]["state"], "SUCCEEDED")
+                    job_id = runs[0]["nodes"]["report"]["job_id"]
+                    for kind in ("manifest", "json", "csv"):
+                        response = client.get(f"{project}/jobs/{job_id}/download/{kind}", auth=guest)
+                        self.assertEqual(response.status_code, 200)
+                        if kind == "manifest":
+                            self.assertEqual(response.json()["dataset"]["version"], 1)
+                            self.assertEqual(response.json()["dataset"]["sha256"], demo_fixture.checksum(demo_fixture.DATA))
+                        if kind == "json":
+                            self.assertEqual(len(response.json()["associations"]), 2)
+            finally:
+                for process in processes:
+                    process.terminate()
+                for process in processes:
+                    process.wait(timeout=10)
+
+    def test_workflow_versions_conditions_and_partial_rerun(self):
+        def node(*parents, when=None):
+            return {"depends_on": list(parents), "when": when, "plugin": "summary@1",
+                    "parameters": {"observations": {"$parameter": "values"}}}
+
+        template = {
+            "root": node(),
+            "branch": node("root", when={"mode": "result_equals", "node": "root", "field": "count", "value": 3}),
+            "skipped": node("root", when={"mode": "failure"}),
+            "final": node("branch", "skipped", when={"mode": "always"}),
+        }
+        with self.engine.begin() as conn:
+            first = publish(conn, "project", template, {"values": [1, 2]}, name="Synthetic")
+            run = start_version(conn, "project", first["id"], {"values": [1, 2, 3]})
+            second = publish(conn, "project", template, {"values": [9, 10]}, definition_id=first["definition_id"])
+            self.assertEqual(second["version"], 2)
+            reconcile(conn)
+            root = claim(conn, "root")
+            finish(conn, root["id"], root["token"], result={"count": 3})
+            reconcile(conn)
+            branch = claim(conn, "branch")
+            finish(conn, branch["id"], branch["token"], error="fixture")
+            reconcile(conn)
+            final = claim(conn, "final")
+            finish(conn, final["id"], final["token"], result={"count": 3})
+            reconcile(conn)
+            before = manifest(conn, "project", run)
+            self.assertEqual(before["state"], "FAILED")
+            self.assertEqual(before["version"]["id"], first["id"])
+            self.assertEqual(before["nodes"]["skipped"]["state"], "SKIPPED")
+            self.assertEqual(before["nodes"]["root"]["parameters"]["observations"], [1, 2, 3])
+            child = rerun(conn, "project", run, "branch")
+            reconcile(conn)
+            for name in ("branch", "final"):
+                job = claim(conn, "rerun-worker")
+                self.assertTrue(job["idempotency_key"].endswith(":" + name))
+                finish(conn, job["id"], job["token"], result={"count": 3})
+                reconcile(conn)
+            after = manifest(conn, "project", child)
+            self.assertEqual(after["state"], "SUCCEEDED")
+            self.assertEqual(after["parent_run_id"], run)
+            self.assertEqual(after["nodes"]["root"]["job_id"], root["id"])
+            self.assertNotEqual(after["nodes"]["final"]["job_id"], final["id"])
+            self.assertEqual(manifest(conn, "project", run), before)
+
+    def test_workflow_cancel_and_dual_scheduler_deduplication(self):
+        template = {"root": {"depends_on": [], "plugin": "summary@1",
+                             "parameters": {"observations": [1, 2]}}}
+        with self.engine.begin() as conn:
+            version = publish(conn, "project", template, {}, name="Schedule")
+            schedule = create_schedule(conn, "project", version["id"], {}, "2025-01-01T10:00:00-08:00",
+                                       "America/Tijuana", None)
+
+        def scheduler(_):
+            with self.engine.begin() as conn:
+                return trigger_due(conn)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertCountEqual(list(pool.map(scheduler, range(2))), [0, 1])
+        with self.engine.begin() as conn:
+            self.assertEqual(trigger_due(conn), 0)
+            run = conn.execute(select(workflow_runs.c.id)).scalar_one()
+            reconcile(conn)
+            lease = claim(conn, "worker")
+            self.assertEqual(cancel_run(conn, "project", run), "CANCEL_REQUESTED")
+            with self.assertRaises(ValueError):
+                rerun(conn, "project", run)
+            self.assertTrue(finish(conn, lease["id"], lease["token"], result={}))
+            reconcile(conn)
+            self.assertEqual(get_run(conn, "project", run)["state"], "CANCELLED")
+            self.assertIsNotNone(rerun(conn, "project", run))
+
+    def test_mobility_pipeline_exports_screened_metrics_and_geojson(self):
+        from fastapi.testclient import TestClient
+        from researchhub import api
+        from researchhub.registry import register, upload
+        from researchhub.storage import LocalStorage
+
+        project = str(uuid4())
+        password = "synthetic-mobility-password"
+        dataset_bytes = (
+            b"participant_id,timestamp_utc,latitude,longitude,steps\n"
+            b"synthetic01,2025-01-01T00:00:00Z,0,0,10\n"
+            b"synthetic01,2025-01-01T00:10:00Z,0.001,0,20\n"
+            b"synthetic01,2025-01-01T00:11:00Z,2,0,30\n"
+        )
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {
+            "RESEARCHHUB_STORAGE": root, "RESEARCHHUB_WORKER_CAPABILITIES": "GENERAL,GENOMICS,GEOSPATIAL",
+        }), patch.object(api, "engine", self.engine):
+            with self.engine.begin() as conn:
+                conn.execute(projects.insert().values(id=project, organization_id="org", name="Mobility"))
+                conn.execute(users.update().where(users.c.id == "requester").values(password_hash=hash_password(password)))
+                conn.execute(memberships.insert().values(project_id=project, user_id="requester", role="researcher"))
+                dataset = register(conn, project, "requester", "Synthetic points")
+                upload(conn, LocalStorage(root), project, dataset, dataset_bytes)
+            for program in ("scheduler", "worker", "worker"):
+                self.launch("-m", "researchhub." + program, stdout=subprocess.DEVNULL)
+            endpoint = "/projects/" + project
+            credentials = ("requester", password)
+            with TestClient(api.app) as client:
+                response = client.post(endpoint + "/research-workflows", auth=credentials, json={
+                    "discipline": "mobility", "dataset": {"id": dataset, "version": 1}, "timezone": "UTC",
+                })
+                self.assertEqual(response.status_code, 200, response.text)
+                run_id = response.json()["id"]
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    with self.engine.connect() as conn:
+                        summary = manifest(conn, project, run_id)
+                    if summary["state"] != "RUNNING":
+                        break
+                    time.sleep(0.2)
+                self.assertEqual(summary["state"], "SUCCEEDED")
+                root_node = summary["nodes"]["dataset-validation"]
+                export = summary["nodes"]["exports"]
+                self.assertEqual(root_node["dataset"]["sha256"], hashlib.sha256(dataset_bytes).hexdigest())
+                self.assertEqual(export["dataset"]["upstream"]["sha256"],
+                                 summary["nodes"]["spatial-aggregation"]["output_sha256"])
+                downloads = f'{endpoint}/jobs/{export["job_id"]}/download/'
+                csv_result = client.get(downloads + "csv", auth=credentials)
+                self.assertEqual(csv_result.status_code, 200)
+                self.assertIn("synthetic01,2025-01-01,3,60,0.111,1,0,0", csv_result.text)
+                geojson = client.get(downloads + "geojson", auth=credentials)
+                self.assertEqual(geojson.status_code, 200)
+                features = geojson.json()["features"]
+                self.assertEqual(len(features), 1)
+                self.assertEqual(features[0]["geometry"]["coordinates"], [[0, 0], [0, 0.001]])
+
+    def test_v1_schema_upgrades_and_preserves_existing_workflow(self):
+        from alembic import command
+        from alembic.config import Config
+        from researchhub.workflows import definition_checksum
+
+        schema = "rh_" + uuid4().hex
+        with self.engine.begin() as conn:
+            conn.execute(text("CREATE SCHEMA " + schema))
+        url = self.url.update_query_dict({"options": "-csearch_path=" + schema})
+        engine = connect(url)
+        config = Config("alembic.ini")
+        try:
+            with patch.dict(os.environ, {"DATABASE_URL": url.render_as_string(hide_password=False)}):
+                command.upgrade(config, "0006")
+                definition = {"root": {"depends_on": [], "plugin": "summary@1",
+                                       "parameters": {"observations": [1, 2]}}}
+                with engine.begin() as conn:
+                    conn.execute(organizations.insert().values(id="legacy-org", name="Legacy Lab"))
+                    conn.execute(projects.insert().values(id="legacy", organization_id="legacy-org", name="Legacy"))
+                    conn.execute(text(
+                        "INSERT INTO workflow_runs (id, project_id, definition, node_order, nodes, state, checked_at) "
+                        "VALUES ('legacy-run', 'legacy', CAST(:definition AS json), "
+                        "'[\"root\"]', '{\"root\": {\"state\": \"WAITING\"}}', 'RUNNING', 0)"
+                    ), {"definition": json.dumps(definition)})
+                command.upgrade(config, "head")
+                command.check(config)
+                with engine.begin() as conn:
+                    run = get_run(conn, "legacy", "legacy-run")
+                    self.assertEqual(run["definition_checksum"], definition_checksum(definition))
+                    self.assertIsNone(run["version_id"])
+                    reconcile(conn)
+                    self.assertEqual(claim(conn, "worker")["project_id"], "legacy")
+        finally:
+            engine.dispose()
+            with self.engine.begin() as conn:
+                conn.execute(text("DROP SCHEMA " + schema + " CASCADE"))
 
     def test_budget_row_lock_prevents_overspending(self):
         with self.engine.begin() as conn:

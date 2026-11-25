@@ -10,6 +10,13 @@ ResearchHub preserves the MIT license text for age-association and false-discove
 - Reuse record: `docs/reuse-matrix.md`
 - This notice does not grant rights beyond the preserved MIT terms or alter the original copyright holder's ownership.
 
+## Wearable Mobility Research Pipeline
+
+ResearchHub adapts MIT-licensed validation, time-series and geospatial routines.
+
+- License file `docs/mobility-LICENSE.txt`
+- Source paths, commit and adaptation `docs/mobility-workflow.md`
+
 ## Source-design references
 
 The following sources were inspected as architectural or domain references. No redistributed source claim is made for them in this repository:
@@ -17,7 +24,7 @@ The following sources were inspected as architectural or domain references. No r
 - Chat-Demo
 - Travel Desk
 - Enterprise Operations AI
-- Wearable Mobility Research Pipeline
+
 - Ads Attribution Pipeline, for which no verified source was used
 
 The Travel Desk source was not found with a trackable redistribution license and no third-party source is claimed as reused from it.

@@ -1,5 +1,11 @@
 # ResearchHub development handoff
 
+## v2 development
+
+Independent branch `feature/researchhub-v2` begins at the published v1 documentation commit `b7afbbe`. The current checkpoint covers resource scheduling, advanced workflow lifecycle and two dataset-backed scientific pipelines. The fixed demo profile passed local authorization and genomics execution checks. The live deployment was inspected through readiness only.
+
+The PostgreSQL backend checkpoint passed 33 tests and 3 subtests. The production frontend bundle built successfully. See [v2 test evidence](docs/test-report-v2.md) and [resume instructions](NEXT_STEPS.md). The headings below record the v1 handoff.
+
 ## Release decision
 
 Core v1 development and local acceptance are complete. The independent public repository is `https://github.com/hwen020/researchhub`; GitHub Actions run `45529021806` is green for backend, frontend and compose at license commit `63532a9`. The owner-authorized MIT License and third-party notices are included. Tag `v1.0.0` and GitHub Release are published. The independent Free Demo is live at https://researchhub-demo.onrender.com with documented Free-instance and ephemeral-artifact limitations.

@@ -3,8 +3,15 @@ import { createRoot } from 'react-dom/client'
 import './style.css'
 
 type Project = { id: string, name: string, organization: string, role: string }
-type Job = { id: string, state: string, plugin: string, attempt: number, result: unknown }
-type Workflow = { id: string, state: string, nodes: Record<string, { state: string }> }
+type Job = { id: string, state: string, plugin: string, attempt: number, result: unknown, wait_reason?: string }
+type Workflow = { id: string, state: string, version_id?: string, parent_id?: string,
+  dependencies: Record<string, string[]>, nodes: Record<string, { state: string, reused_from?: string }> }
+type Quota = { max_concurrent: number, max_queued: number, quota_cpu: number, quota_memory: number }
+type Resources = { quota: Quota, usage: { active: number, queued: number, cpu_units: number, memory_units: number } }
+type Worker = { id: string, capabilities: string[], cpu_units: number, memory_units: number }
+type Template = { id: string, name: string }
+type WorkflowVersion = { id: string, version: number, checksum: string }
+type Schedule = { id: string, next_at: number | null, zone: string }
 type Dataset = { id: string, name: string }
 type Organization = { id: string, name: string }
 type Member = { username: string, role: 'pi' | 'researcher' | 'finance' }
@@ -12,7 +19,7 @@ type Funding = {
   budget: { limit: number, spent: number },
   requests: { id: string, purpose: string, amount: number, state: string }[],
 }
-const sections = ['Overview', 'Jobs', 'Workflows', 'Datasets', 'Funding', 'Members', 'Audit', 'System health', 'Administration'] as const
+const sections = ['Overview', 'Jobs', 'Workflows', 'Resources', 'Datasets', 'Funding', 'Members', 'Audit', 'System health', 'Administration'] as const
 type Section = typeof sections[number]
 
 function Workspace() {
@@ -22,6 +29,13 @@ function Workspace() {
   const [section, setSection] = useState<Section>('Overview')
   const [jobs, setJobs] = useState<Job[]>([])
   const [workflows, setWorkflows] = useState<Workflow[]>([])
+  const [resources, setResources] = useState<Resources | null>(null)
+  const [workerList, setWorkerList] = useState<Worker[]>([])
+  const [templates, setTemplates] = useState<Template[]>([])
+  const [selectedTemplate, setSelectedTemplate] = useState('')
+  const [versions, setVersions] = useState<WorkflowVersion[]>([])
+  const [schedules, setSchedules] = useState<Schedule[]>([])
+  const [isDemo, setIsDemo] = useState(false)
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [funding, setFunding] = useState<Funding | null>(null)
   const [members, setMembers] = useState<Member[]>([])
@@ -37,6 +51,8 @@ function Workspace() {
   const [temporaryPassword, setTemporaryPassword] = useState('')
   const refreshSequence = useRef(0)
   const project = projects.find((item) => item.id === projectId)
+  const projectPath = '/projects/' + projectId
+  const canCompute = !isDemo && ['pi', 'researcher', 'platform_admin'].includes(project?.role ?? '')
 
   async function api<T>(path: string, init?: RequestInit, authorization = token): Promise<T> {
     const headers = new Headers(init?.headers)
@@ -67,6 +83,27 @@ function Workspace() {
       const base = '/projects/' + projectId
       if (section === 'Overview' || section === 'Jobs') setJobs(await api<Job[]>(base + '/jobs'))
       if (section === 'Overview' || section === 'Workflows') setWorkflows(await api<Workflow[]>(base + '/workflows'))
+      if (section === 'Workflows' && !isDemo) {
+        const [currentTemplates, currentSchedules, currentDatasets] = await Promise.all([
+          api<Template[]>(base + '/workflow-templates'), api<Schedule[]>(base + '/workflow-schedules'),
+          api<Dataset[]>(base + '/datasets'),
+        ])
+        if (refreshId === refreshSequence.current) {
+          setTemplates(currentTemplates)
+          setSchedules(currentSchedules)
+          setDatasets(currentDatasets)
+          if (selectedTemplate) setVersions(await api<WorkflowVersion[]>(base + '/workflow-templates/' + selectedTemplate + '/versions'))
+        }
+      }
+      if (section === 'Resources') {
+        const [snapshot, online] = await Promise.all([
+          api<Resources>(base + '/resources'), isAdmin ? api<Worker[]>('/admin/workers') : Promise.resolve([]),
+        ])
+        if (refreshId === refreshSequence.current) {
+          setResources(snapshot)
+          setWorkerList(online)
+        }
+      }
       if (section === 'Datasets') {
         const currentDatasets = await api<Dataset[]>(base + '/datasets')
         if (refreshId === refreshSequence.current) setDatasets(currentDatasets)
@@ -89,9 +126,21 @@ function Workspace() {
     setJobs([])
     setWorkflows([])
     setDatasets([])
+    setResources(null)
     setFunding(null)
     if (token) void refresh()
   }, [token, projectId, section])
+
+  useEffect(() => {
+    setSelectedTemplate('')
+    setTemplates([])
+    setVersions([])
+    setSchedules([])
+  }, [projectId])
+
+  async function jsonAction(path: string, body: unknown, method = 'POST') {
+    return api(path, { method, body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })
+  }
 
   async function run(action: () => Promise<void>) {
     try { setStatus(''); await action() }
@@ -128,6 +177,7 @@ function Workspace() {
   return <div className="shell">
     <aside><div className="brand"><span>R</span> ResearchHub</div>
       {token && <nav aria-label="Workspace">{sections.filter((item) =>
+        (!isDemo || ['Overview', 'Jobs', 'Workflows', 'Datasets', 'System health'].includes(item)) &&
         (item !== 'Administration' || isAdmin) &&
         (item !== 'Members' || ['pi', 'platform_admin'].includes(project?.role ?? ''))
       ).map((item) =>
@@ -139,7 +189,7 @@ function Workspace() {
         <h1>{token ? section : 'Sign in'}</h1></div>
         {token && <button onClick={() => {
           setToken(''); setProjectId(''); setProjects([]); setStatus(''); setSection('Overview')
-          setIsAdmin(false); setTemporaryPassword(''); setDetails(null)
+          setIsAdmin(false); setIsDemo(false); setTemporaryPassword(''); setDetails(null)
         }}>Sign out</button>}
       </header>
       {status && <p role="alert" className="status">{status}</p>}
@@ -166,8 +216,9 @@ function Workspace() {
         const form = new FormData(event.currentTarget)
         void run(async () => {
           const authorization = btoa(String(form.get('user')) + ':' + String(form.get('password')))
-          const authStatus = await api<{ platform_admin: boolean, must_change_password: boolean }>('/auth/status', undefined, authorization)
+          const authStatus = await api<{ platform_admin: boolean, must_change_password: boolean, demo_mode: boolean }>('/auth/status', undefined, authorization)
           setIsAdmin(authStatus.platform_admin)
+          setIsDemo(authStatus.demo_mode)
           if (authStatus.must_change_password) {
             setPendingAuthorization(authorization); setPendingUsername(String(form.get('user')))
             setStatus('A temporary password must be changed before continuing.')
@@ -194,27 +245,125 @@ function Workspace() {
           <article className="panel"><span>Queued or retrying</span><strong>{jobs.filter((job) => ['QUEUED','RETRYING'].includes(job.state)).length}</strong></article>
           <article className="panel"><span>Running workflows</span><strong>{workflows.filter((workflow) => workflow.state === 'RUNNING').length}</strong></article>
         </div>}
-        {(section === 'Jobs' || section === 'Workflows') && projectId && <div className="panel action">
+        {isDemo && section === 'Overview' && <p className="panel">Read-only demonstration. Open Workflows to inspect the fixed synthetic genomics run.</p>}
+        {(section === 'Jobs' || section === 'Workflows') && canCompute && <div className="panel action">
           <label>Observations<input value={observations} onChange={(event) => setObservations(event.target.value)} /></label>
           <button className="primary" onClick={() => void run(() => submit(section === 'Workflows'))}>
             {section === 'Jobs' ? 'Submit summary job' : 'Run summary template'}
           </button>
         </div>}
         {section === 'Jobs' && <div className="panel table-wrap"><table><thead><tr><th scope="col">Plugin</th><th scope="col">Status</th><th scope="col">Attempt</th><th scope="col">Actions</th></tr></thead>
-          <tbody>{jobs.map((job) => <tr key={job.id}><td>{job.plugin}</td><td><span className="badge">{job.state}</span></td><td>{job.attempt}</td>
+          <tbody>{jobs.map((job) => <tr key={job.id}><td>{job.plugin}</td><td><span className="badge">{job.state}</span>{job.wait_reason && <small className="wait-reason">{job.wait_reason.replaceAll('_', ' ')}</small>}</td><td>{job.attempt}</td>
             <td><button onClick={() => void run(async () => setDetails({ result: job.result, events: await api('/projects/' + projectId + '/jobs/' + job.id + '/events') }))}>Details</button>
-            {job.state === 'SUCCEEDED' && (['manifest', 'json', 'csv'] as const).map((kind) =>
+            {job.state === 'SUCCEEDED' && (['manifest', 'json', 'csv', ...(job.plugin === 'mobility-report@1' ? ['geojson'] : [])]).map((kind) =>
               <button key={kind} onClick={() => void run(() => download('/projects/' + projectId + '/jobs/' + job.id + '/download/' + kind, kind === 'manifest' ? 'manifest.json' : 'result.' + kind))}>
                 {kind === 'manifest' ? 'Manifest' : kind.toUpperCase()}
               </button>)}
-            {['QUEUED', 'RUNNING', 'RETRYING'].includes(job.state) && <button onClick={() => void run(async () => {
+            {canCompute && ['QUEUED', 'RUNNING', 'RETRYING'].includes(job.state) && <button onClick={() => void run(async () => {
               await api('/projects/' + projectId + '/jobs/' + job.id + '/cancel', { method: 'POST' }); await refresh()
             })}>Cancel</button>}</td></tr>)}</tbody></table>
           {jobs.length === 0 && <p>No jobs submitted in this project.</p>}</div>}
-        {section === 'Workflows' && workflows.map((workflow) => <article className="panel workflow" key={workflow.id}>
-          <h2>Summary workflow <span className="badge">{workflow.state}</span></h2>
-          <ol>{Object.entries(workflow.nodes).map(([name, node]) => <li key={name}><b>{name}</b><span>{node.state}</span></li>)}</ol>
-        </article>)}
+        {section === 'Resources' && resources && <>
+          <section className="panel">
+            <h2>Project resource usage</h2>
+            <dl className="usage-grid">
+              <div><dt>Concurrent attempts</dt><dd>{resources.usage.active} / {resources.quota.max_concurrent}</dd></div>
+              <div><dt>Outstanding jobs</dt><dd>{resources.usage.active + resources.usage.queued} / {resources.quota.max_queued}</dd></div>
+              <div><dt>Logical CPU units</dt><dd>{resources.usage.cpu_units} / {resources.quota.quota_cpu}</dd></div>
+              <div><dt>Logical memory units</dt><dd>{resources.usage.memory_units} / {resources.quota.quota_memory}</dd></div>
+            </dl>
+            {isAdmin && <form key={JSON.stringify(resources.quota)} className="quota-form" onSubmit={(event) => {
+              event.preventDefault()
+              const form = new FormData(event.currentTarget)
+              void run(async () => {
+                await jsonAction(projectPath + '/resources', Object.fromEntries(Object.keys(resources.quota).map((key) =>
+                  [key, Number(form.get(key))])), 'PUT')
+                await refresh()
+              })
+            }}>
+              {([['max_concurrent', 'Concurrent limit'], ['max_queued', 'Outstanding limit'],
+                ['quota_cpu', 'Logical CPU limit'], ['quota_memory', 'Logical memory limit']] as const).map(([key, label]) =>
+                <label key={key}>{label}<input name={key} type="number" min="1"
+                  defaultValue={resources.quota[key]} required /></label>)}
+              <button className="primary">Save quota</button>
+            </form>}
+          </section>
+          {isAdmin && <section className="panel">
+            <h2>Online workers</h2>
+            {workerList.length === 0 && <p>No workers reported a recent heartbeat.</p>}
+            <ul>{workerList.map((worker) => <li key={worker.id}>{worker.capabilities.join(', ')} · {worker.cpu_units} CPU / {worker.memory_units} memory units</li>)}</ul>
+          </section>}
+        </>}
+        {section === 'Workflows' && <>
+          {canCompute && <section className="panel">
+            <h2>Research workflows</h2>
+            {datasets.length === 0 ? <p>Register and upload a dataset version to run an analysis.</p> :
+              <form className="quota-form" onSubmit={(event) => {
+                event.preventDefault()
+                const form = new FormData(event.currentTarget)
+                void run(async () => {
+                  await jsonAction(projectPath + '/research-workflows', {
+                    discipline: form.get('discipline'), timezone: form.get('timezone'),
+                    dataset: { id: form.get('dataset'), version: Number(form.get('version')) },
+                  })
+                  await refresh()
+                })
+              }}>
+                <label>Discipline<select name="discipline"><option value="genomics">Genomics</option>
+                  <option value="mobility">Wearable mobility</option></select></label>
+                <label>Dataset<select name="dataset" required>{datasets.map((dataset) =>
+                  <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label>
+                <label>Dataset version<input name="version" type="number" min="1" defaultValue="1" required /></label>
+                <label>Study timezone<input name="timezone" defaultValue="UTC" required /></label>
+                <button className="primary">Start research workflow</button>
+              </form>}
+          </section>}
+          {!isDemo && <section className="panel">
+            <h2>Workflow versions and schedules</h2>
+            {templates.length === 0 ? <p>No versioned templates in this project.</p> :
+              <label>Template <select value={selectedTemplate} onChange={(event) => {
+                const id = event.target.value
+                setSelectedTemplate(id); setVersions([])
+                if (id) void run(async () => setVersions(await api<WorkflowVersion[]>(projectPath + '/workflow-templates/' + id + '/versions')))
+              }}><option value="">Select a template</option>
+                {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+              </select></label>}
+            <ul>{versions.map((version) => <li key={version.id}>Version {version.version} <code>{version.checksum.slice(0, 12)}</code>
+              {canCompute && <button onClick={() => void run(async () => {
+                await jsonAction(projectPath + '/workflow-versions/' + version.id + '/runs', {}); await refresh()
+              })}>Run with defaults</button>}</li>)}</ul>
+            {schedules.length === 0 ? <p>No scheduled workflows.</p> :
+              <ul>{schedules.map((schedule) => <li key={schedule.id}>{schedule.next_at === null ? 'Completed' :
+                new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZone: schedule.zone }).format(schedule.next_at)} · {schedule.zone}</li>)}</ul>}
+          </section>}
+          {workflows.length === 0 && !loading && <p>No workflow runs in this project.</p>}
+          {workflows.map((workflow) => {
+            const path = projectPath + '/workflows/' + workflow.id
+            const canRerun = canCompute && ['FAILED', 'CANCELLED'].includes(workflow.state)
+            return <article className="panel workflow" key={workflow.id}>
+              <h2>{isDemo ? 'Synthetic genomics workflow' : 'Workflow run'} <span className="badge">{workflow.state}</span></h2>
+              <div className="action">
+                <button onClick={() => void run(async () => setDetails(await api(path + '/provenance')))}>Provenance</button>
+                <button onClick={() => void run(() => download(path + '/provenance?download=true', 'provenance.json'))}>Download provenance</button>
+                {workflow.parent_id && <button onClick={() => void run(async () =>
+                  setDetails(await api(path + '/compare/' + workflow.parent_id)))}>Compare with parent</button>}
+                {canRerun && <button onClick={() => void run(async () => {
+                  await jsonAction(path + '/rerun', {}); await refresh()
+                })}>Rerun workflow</button>}
+                {canCompute && workflow.state === 'RUNNING' && <button onClick={() => void run(async () => {
+                  await api(path + '/cancel', { method: 'POST' }); await refresh()
+                })}>Cancel workflow</button>}
+              </div>
+              <ol>{Object.entries(workflow.nodes).map(([name, node]) => <li key={name}>
+                <b>{name}</b><span>{node.state}{node.reused_from && ' · reused'}</span>
+                {workflow.dependencies?.[name]?.length > 0 && <small>After {workflow.dependencies[name].join(', ')}</small>}
+                {canRerun && ['FAILED', 'CANCELLED'].includes(node.state) && <button onClick={() => void run(async () => {
+                  await jsonAction(path + '/rerun', { failed_node: name }); await refresh()
+                })}>Rerun from {name}</button>}
+              </li>)}</ol>
+            </article>
+          })}
+        </>}
         {section === 'Datasets' && <section className="panel"><ul>{datasets.map((dataset) => <li key={dataset.id}>
           <button onClick={() => void run(async () => setDetails(await api('/projects/' + projectId + '/datasets/' + dataset.id + '/versions')))}>{dataset.name}</button>
         </li>)}</ul>{datasets.length === 0 && <p>No datasets registered in this project.</p>}</section>}

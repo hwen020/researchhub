@@ -20,9 +20,16 @@ Export a new bootstrap username and password in the invoking shell before runnin
 - [Security](docs/security-model.md), [reproducibility](docs/research-reproducibility.md) and [source provenance](docs/reuse-matrix.md)
 - [Acceptance report](docs/test-report-v1.md) and [measured benchmark](docs/benchmarks.md)
 
+## v2 development
+
+- [Resource scheduling](docs/resource-scheduler.md) and [fairness](docs/fair-scheduling.md)
+- [Conditional workflows](docs/advanced-workflow-engine.md), [versions and schedules](docs/workflow-versioning.md) and [provenance](docs/research-plugin-interface.md)
+- [Wearable mobility methods and exports](docs/mobility-workflow.md)
+- [v2 test evidence](docs/test-report-v2.md) and [acceptance matrix](docs/v2-acceptance-matrix.md)
+
 ## Release verification status
 
-The current 390px Edge browser suite passes 2 tests, the frontend production build passes, migration metadata is clean through the current head, and the dedicated PostgreSQL backend suite passes 25 tests. GitHub Actions run `45525441466` passed backend, frontend and compose; public repository, tag/release and public demo deployment remain separate publication gates.
+The published v1.0.0 release passed 25 PostgreSQL backend tests and two 390 px Edge checks. The v2 development branch has separate acceptance results. [v1.0.0 release](https://github.com/hwen020/researchhub/releases/tag/v1.0.0).
 
 ## License
 
@@ -36,7 +43,7 @@ The repository includes an independent Render Free Demo blueprint in [render.yam
 
 The Demo runs the existing API and a local demo worker/scheduler in one web instance. It is not a claim of the full distributed worker architecture or durable artifact storage. `/tmp` artifacts, Free web spin-down/restarter behavior and the 30-day Free PostgreSQL limit do not provide full Compose durability.
 
-For a local demo image check, build `demo/Dockerfile`. The synthetic browser fixture is `fixture-pi` / `synthetic-public-demo-only` and must not be reused outside an isolated demo environment.
+The v2 branch's `demo/Dockerfile` seeds a fixed read-only Genomics DAG. Its synthetic login is `demo-guest` / `synthetic-public-demo-only`. The public URL above still refers to the v1 deployment.
 
 ## Tests
 

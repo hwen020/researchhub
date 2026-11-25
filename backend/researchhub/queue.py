@@ -13,11 +13,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .models import events, jobs
+from .resource_policy import ACTIVE, READY, admit, candidate, dispatch_project, requirements, scheduling_lock
 
 
 LEASE_MS = 10_000
-ACTIVE = ("RUNNING", "CANCEL_REQUESTED")
-READY = ("QUEUED", "RETRYING")
 TERMINAL = ("SUCCEEDED", "FAILED", "CANCELLED")
 
 
@@ -41,15 +40,27 @@ def record(connection, job, state, reason, timestamp):
 
 
 def submit(connection, project_id, key, plugin, parameters, *, max_attempts=3, timeout_ms=30_000,
-           provenance=None):
+           provenance=None, capability=None, cpu_units=1, memory_units=1, priority=0):
     if not 1 <= len(key) <= 128 or not 1 <= max_attempts <= 8 or not 1 <= timeout_ms <= 300_000:
         raise ValueError("Invalid idempotency key or retry settings")
+    resources = requirements(plugin, capability, cpu_units, memory_units, priority)
     inputs = [plugin, parameters, max_attempts, timeout_ms]
     if provenance is not None:
         inputs.append(provenance)
+    if resources != requirements(plugin, None, 1, 1, 0):
+        inputs.append({"resources": resources})
     body = json.dumps(inputs,
                       sort_keys=True, allow_nan=False, separators=(",", ":"))
     fingerprint = hashlib.sha256(body.encode()).hexdigest()
+    scheduling_lock(connection)
+    existing = connection.execute(select(jobs).where(
+        jobs.c.project_id == project_id, jobs.c.idempotency_key == key,
+    )).mappings().one_or_none()
+    if existing is not None:
+        if existing["fingerprint"] != fingerprint:
+            raise IdempotencyConflict("Idempotency key already used with different inputs")
+        return existing
+    admit(connection, project_id, resources)
     timestamp = now_ms(connection)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     inserted = connection.execute(
@@ -57,7 +68,7 @@ def submit(connection, project_id, key, plugin, parameters, *, max_attempts=3, t
             id=str(uuid4()), project_id=project_id, idempotency_key=key,
             fingerprint=fingerprint, plugin=plugin, parameters=parameters, provenance=provenance,
             state="QUEUED", max_attempts=max_attempts, timeout_ms=timeout_ms,
-            created_at=timestamp, available_at=timestamp,
+            created_at=timestamp, available_at=timestamp, **resources,
         ).on_conflict_do_nothing(
             index_elements=[jobs.c.project_id, jobs.c.idempotency_key]
         )
@@ -79,13 +90,10 @@ def locked_job(connection, job_id, project_id=None):
     return connection.execute(query.with_for_update()).mappings().one_or_none()
 
 
-def claim(connection, worker):
+def claim(connection, worker, capabilities=("GENERAL", "GENOMICS"), cpu_units=32, memory_units=32, *, project_id=None):
+    scheduling_lock(connection)
     timestamp = now_ms(connection)
-    job = connection.execute(
-        select(jobs).where(jobs.c.state.in_(READY), jobs.c.available_at <= timestamp)
-        .order_by(jobs.c.available_at, jobs.c.created_at, jobs.c.id)
-        .limit(1).with_for_update(skip_locked=True)
-    ).mappings().one_or_none()
+    job = candidate(connection, timestamp, capabilities, cpu_units, memory_units, project_id)
     if job is None:
         return None
     deadline = timestamp + job["timeout_ms"]
@@ -94,6 +102,7 @@ def claim(connection, worker):
         token=str(uuid4()), deadline=deadline, lease_until=min(deadline, timestamp + LEASE_MS),
     )
     connection.execute(jobs.update().where(jobs.c.id == job["id"]).values(**values))
+    dispatch_project(connection, job["project_id"])
     claimed = dict(job, **values)
     record(connection, claimed, "RUNNING", "claimed", timestamp)
     return claimed
@@ -132,7 +141,7 @@ def transition(connection, job, state, reason, timestamp, result=None):
 def manifest(job, result, timestamp):
     payload = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
     runtime = {"python": platform.python_version()}
-    if job["plugin"] == "age-association@1":
+    if job["plugin"] == "age-association@1" or job["plugin"].startswith("genomics-"):
         for dependency in ("numpy", "pandas", "scipy"):
             try:
                 runtime[dependency] = version(dependency)
@@ -193,13 +202,16 @@ def finish(connection, job_id, token, *, result=None, error=None, retryable=Fals
     return True
 
 
-def recover(connection):
+def recover(connection, *, project_id=None):
     timestamp = now_ms(connection)
-    expired = connection.execute(select(jobs).where(and_(
+    query = select(jobs).where(and_(
         jobs.c.state.in_(ACTIVE),
         or_(jobs.c.lease_until <= timestamp, jobs.c.deadline <= timestamp),
-    )).order_by(jobs.c.lease_until, jobs.c.id).limit(100)
-        .with_for_update(skip_locked=True)).mappings().all()
+    ))
+    if project_id is not None:
+        query = query.where(jobs.c.project_id == project_id)
+    expired = connection.execute(query.order_by(jobs.c.lease_until, jobs.c.id).limit(100)
+                                 .with_for_update(skip_locked=True)).mappings().all()
     for job in expired:
         if job["state"] == "CANCEL_REQUESTED":
             transition(connection, job, "CANCELLED", "cancel_lease_expired", timestamp)

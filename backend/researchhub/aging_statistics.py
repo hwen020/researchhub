@@ -27,7 +27,7 @@ def benjamini_hochberg(pvalues: np.ndarray | list[float]) -> np.ndarray:
     return result
 
 
-def age_association(ds: Dataset, *, group: str | None = None) -> pd.DataFrame:
+def age_association_raw(ds: Dataset, *, group: str | None = None) -> pd.DataFrame:
     """Exploratory per-gene Spearman associations with chronological age.
 
     P-values do not adjust for sex, batch, ancestry, cell composition or other
@@ -51,6 +51,14 @@ def age_association(ds: Dataset, *, group: str | None = None) -> pd.DataFrame:
             if not np.isfinite(p):
                 rho, p = 0.0, 1.0
         rows.append((gene, float(rho), float(p)))
-    frame = pd.DataFrame(rows, columns=["gene_id", "spearman_rho", "p_value"])
+    return pd.DataFrame(rows, columns=["gene_id", "spearman_rho", "p_value"])
+
+
+def adjust_associations(frame):
+    frame = frame.copy()
     frame["fdr"] = benjamini_hochberg(frame["p_value"].to_numpy())
     return frame.sort_values(["fdr", "p_value", "gene_id"], kind="stable").reset_index(drop=True)
+
+
+def age_association(ds: Dataset, *, group: str | None = None) -> pd.DataFrame:
+    return adjust_associations(age_association_raw(ds, group=group))

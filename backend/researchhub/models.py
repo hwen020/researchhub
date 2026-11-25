@@ -14,6 +14,13 @@ projects = Table(
     Column("id", String(36), primary_key=True),
     Column("organization_id", ForeignKey("organizations.id"), nullable=False),
     Column("name", String(200), nullable=False),
+    Column("max_concurrent", Integer, nullable=False, server_default="8"),
+    Column("max_queued", Integer, nullable=False, server_default="512"),
+    Column("quota_cpu", Integer, nullable=False, server_default="32"),
+    Column("quota_memory", Integer, nullable=False, server_default="32"),
+    Column("last_dispatch", BigInteger, nullable=False, server_default="0"),
+    CheckConstraint("max_concurrent > 0 AND max_queued > 0 AND quota_cpu > 0 AND quota_memory > 0",
+                    name="projects_positive_quota"),
 )
 users = Table(
     "users", metadata,
@@ -51,16 +58,26 @@ jobs = Table(
     Column("result", JSON),
     Column("manifest", JSON),
     Column("provenance", JSON),
+    Column("capability", String(32), nullable=False, server_default="GENERAL"),
+    Column("cpu_units", Integer, nullable=False, server_default="1"),
+    Column("memory_units", Integer, nullable=False, server_default="1"),
+    Column("priority", Integer, nullable=False, server_default="0"),
+    CheckConstraint("cpu_units BETWEEN 1 AND 1024 AND memory_units BETWEEN 1 AND 1024 AND priority BETWEEN 0 AND 10",
+                    name="jobs_resource_bounds"),
     UniqueConstraint("project_id", "idempotency_key"),
     CheckConstraint("attempt >= 0 AND max_attempts BETWEEN 1 AND 8 AND timeout_ms > 0"),
     CheckConstraint("state IN ('QUEUED','RUNNING','RETRYING','SUCCEEDED','FAILED','CANCEL_REQUESTED','CANCELLED')"),
 )
 Index("jobs_ready", jobs.c.state, jobs.c.available_at)
 Index("jobs_lease", jobs.c.state, jobs.c.lease_until)
+Index("jobs_project_state", jobs.c.project_id, jobs.c.state)
 workers = Table(
     "worker_heartbeats", metadata,
     Column("id", String(100), primary_key=True),
     Column("last_seen", BigInteger, nullable=False, index=True),
+    Column("capabilities", JSON, nullable=False, server_default='["GENERAL", "GENOMICS"]'),
+    Column("cpu_units", Integer, nullable=False, server_default="32"),
+    Column("memory_units", Integer, nullable=False, server_default="32"),
 )
 events = Table(
     "job_events", metadata,
@@ -72,6 +89,23 @@ events = Table(
     Column("timestamp", BigInteger, nullable=False),
 )
 Index("job_events_timestamp", events.c.timestamp, events.c.id)
+workflow_definitions = Table(
+    "workflow_definitions", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("project_id", ForeignKey("projects.id"), nullable=False),
+    Column("name", String(120), nullable=False),
+)
+Index("workflow_definitions_project", workflow_definitions.c.project_id)
+workflow_versions = Table(
+    "workflow_versions", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("definition_id", ForeignKey("workflow_definitions.id"), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("definition", JSON, nullable=False),
+    Column("defaults", JSON, nullable=False),
+    Column("checksum", String(64), nullable=False),
+    UniqueConstraint("definition_id", "version"),
+)
 workflow_runs = Table(
     "workflow_runs", metadata,
     Column("id", String(36), primary_key=True),
@@ -81,8 +115,25 @@ workflow_runs = Table(
     Column("nodes", JSON, nullable=False),
     Column("state", String(24), nullable=False),
     Column("checked_at", BigInteger, nullable=False, default=0),
+    Column("version_id", ForeignKey("workflow_versions.id")),
+    Column("parent_id", ForeignKey("workflow_runs.id")),
+    Column("parameters", JSON),
+    Column("definition_checksum", String(64), nullable=False),
 )
 Index("workflow_schedule", workflow_runs.c.state, workflow_runs.c.checked_at)
+workflow_schedules = Table(
+    "workflow_schedules", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("project_id", ForeignKey("projects.id"), nullable=False),
+    Column("version_id", ForeignKey("workflow_versions.id"), nullable=False),
+    Column("parameters", JSON, nullable=False),
+    Column("zone", String(64), nullable=False),
+    Column("next_at", BigInteger),
+    Column("interval_ms", BigInteger),
+    Column("last_run_id", ForeignKey("workflow_runs.id")),
+    Column("last_scheduled_at", BigInteger),
+)
+Index("workflow_schedules_due", workflow_schedules.c.next_at, workflow_schedules.c.id)
 budgets = Table(
     "budgets", metadata,
     Column("project_id", ForeignKey("projects.id"), primary_key=True),

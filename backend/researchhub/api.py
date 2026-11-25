@@ -21,12 +21,21 @@ from sqlalchemy.exc import OperationalError
 from .auth import hash_password, require_project, verify_password
 from .db import connect
 from .finance import decide, request_funds
+from .demo_fixture import GUEST_ID, PROJECT_ID
 from .models import api_rate_limits, audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, system_audit, users, versions, workers, workflow_runs
 from .plugins import validate_parameters
 from .queue import IdempotencyConflict, cancel, now_ms, submit
+from .resource_policy import (
+    ACTIVE, READY, QUOTA_FIELDS, QueueFull, online_workers, project_usage,
+    scheduling_lock, system_limit, wait_reason,
+)
 from .registry import MAX_UPLOAD, compute_inputs, download, register, upload
+from .research_workflows import start_research
 from .storage import LocalStorage
-from .workflows import start
+from . import provenance as run_provenance
+from .models import workflow_definitions, workflow_schedules, workflow_versions
+from .workflow_versions import create_schedule, publish, start_version
+from .workflows import cancel_run, rerun, start
 
 app = FastAPI(title="ResearchHub")
 engine = connect()
@@ -96,16 +105,82 @@ class JobInput(RequestModel):
     dataset: DatasetReference | None = None
     timeout_ms: int = Field(30_000, ge=1000, le=300_000)
     max_attempts: int = Field(3, ge=1, le=8)
+    capability: Literal["GENERAL", "GENOMICS", "GEOSPATIAL", "HIGH_MEMORY"] | None = None
+    cpu_units: int = Field(1, ge=1, le=1024)
+    memory_units: int = Field(1, ge=1, le=1024)
+    priority: int = Field(0, ge=0, le=10)
+
+
+class ResourceQuotaInput(RequestModel):
+    max_concurrent: int = Field(ge=1, le=1024)
+    max_queued: int = Field(ge=1, le=10000)
+    quota_cpu: int = Field(ge=1, le=100000)
+    quota_memory: int = Field(ge=1, le=100000)
+
+
+class DependencyCondition(RequestModel):
+    mode: Literal["success", "failure", "always", "result_equals"]
+    node: str | None = Field(None, max_length=64)
+    field: str | None = Field(None, max_length=64)
+    value: str | int | float | bool | None = None
 
 
 class NodeInput(RequestModel):
     plugin: Literal["summary@1", "age-association@1"]
-    parameters: dict
+    parameters: dict | None = None
+    dataset: DatasetReference | None = None
     depends_on: List[str] = Field(default_factory=list, max_length=64)
+    when: DependencyCondition | None = None
 
 
 class WorkflowInput(RequestModel):
     nodes: Dict[str, NodeInput] = Field(min_length=1, max_length=64)
+
+
+class WorkflowVersionInput(WorkflowInput):
+    defaults: dict = Field(default_factory=dict, max_length=64)
+
+
+class WorkflowTemplateInput(WorkflowVersionInput):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class WorkflowParameters(RequestModel):
+    parameters: dict = Field(default_factory=dict, max_length=64)
+
+
+class WorkflowScheduleInput(WorkflowParameters):
+    start_at: str = Field(max_length=40)
+    zone: str = Field(min_length=1, max_length=64)
+    interval_seconds: int | None = Field(None, ge=60, le=31_536_000)
+
+
+class ResearchWorkflowInput(RequestModel):
+    discipline: Literal["genomics", "mobility"]
+    dataset: DatasetReference
+    timezone: str = Field("UTC", min_length=1, max_length=64)
+
+
+class WorkflowRerunInput(RequestModel):
+    failed_node: str | None = Field(None, min_length=1, max_length=64)
+
+
+def prepare_workflow(connection, project, nodes, *, template=False):
+    definition = {}
+    for name, node in nodes.items():
+        spec = node.model_dump(exclude={"dataset", "when"})
+        if node.when is not None:
+            spec["when"] = node.when.model_dump(exclude_unset=True)
+        if (node.parameters is None) == (node.dataset is None):
+            raise ValueError("Each node must provide parameters or a dataset version")
+        if node.dataset is not None:
+            spec["parameters"], spec["provenance"] = compute_inputs(
+                connection, storage(), project, str(node.dataset.id), node.dataset.version, node.plugin,
+            )
+        if not template or node.dataset is not None:
+            spec["parameters"] = validate_parameters(node.plugin, spec["parameters"])
+        definition[name] = spec
+    return definition
 
 
 class FundingInput(RequestModel):
@@ -274,6 +349,11 @@ def authenticate(request: Request, credentials: HTTPBasicCredentials | None = De
             if account_hits > AUTH_FAILURE_LIMIT or source_hits > AUTH_SOURCE_FAILURE_LIMIT:
                 raise rate_limited(AUTH_FAILURE_WINDOW_MS)
         raise HTTPException(401, "Invalid credentials")
+    if os.getenv("RESEARCHHUB_DEMO_MODE") == "1":
+        if user["id"] != GUEST_ID or user["platform_admin"]:
+            raise HTTPException(401, "Invalid credentials")
+        if request.method not in {"GET", "HEAD"}:
+            raise HTTPException(403, "The public demo runs a fixed synthetic workflow")
     if user["must_change_password"] and request.url.path not in {"/auth/status", "/auth/password"}:
         raise HTTPException(403, "Password change required")
     if request.method == "POST":
@@ -288,6 +368,8 @@ def authenticate(request: Request, credentials: HTTPBasicCredentials | None = De
 
 
 def authorize(connection, user, project_id, roles):
+    if os.getenv("RESEARCHHUB_DEMO_MODE") == "1" and project_id != PROJECT_ID:
+        raise HTTPException(404, "Project not found")
     if connection.execute(select(projects.c.id).where(projects.c.id == project_id)).scalar_one_or_none() is None:
         raise HTTPException(404, "Project not found")
     try:
@@ -297,7 +379,10 @@ def authorize(connection, user, project_id, roles):
 
 
 def public_job(job):
-    return {key: job[key] for key in ("id", "state", "plugin", "attempt", "created_at", "result")}
+    return {key: job[key] for key in (
+        "id", "state", "plugin", "attempt", "created_at", "result",
+        "capability", "cpu_units", "memory_units", "priority",
+    )}
 
 
 def log_action(connection, user, project, action, subject):
@@ -322,7 +407,8 @@ def require_admin(user):
 @app.get("/auth/status")
 def auth_status(user=Depends(authenticate)):
     return {"platform_admin": bool(user["platform_admin"]),
-            "must_change_password": bool(user["must_change_password"])}
+            "must_change_password": bool(user["must_change_password"]),
+            "demo_mode": os.getenv("RESEARCHHUB_DEMO_MODE") == "1"}
 
 
 @app.post("/auth/password")
@@ -476,7 +562,7 @@ def project_audit(project_id: UUID, user=Depends(authenticate), connection=Depen
 
 
 @app.get("/projects/{project_id}/jobs/{job_id}/download/{kind}")
-def download_job(project_id: UUID, job_id: UUID, kind: Literal["manifest", "json", "csv"],
+def download_job(project_id: UUID, job_id: UUID, kind: Literal["manifest", "json", "csv", "geojson"],
                  user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
     authorize(connection, user, project, COMPUTE_ROLES)
@@ -487,10 +573,15 @@ def download_job(project_id: UUID, job_id: UUID, kind: Literal["manifest", "json
         raise HTTPException(404, "Artifact not available")
     filename = "manifest.json" if kind == "manifest" else "result." + kind
     headers = {"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"}
-    log_action(connection, user, project, "job_artifact_download", str(job_id))
+    if os.getenv("RESEARCHHUB_DEMO_MODE") != "1":
+        log_action(connection, user, project, "job_artifact_download", str(job_id))
+    if kind == "geojson":
+        if "geojson" not in row["result"]:
+            raise HTTPException(404, "GeoJSON is unavailable for this job")
+        return JSONResponse(row["result"]["geojson"], media_type="application/geo+json", headers=headers)
     if kind != "csv":
         return JSONResponse(row["manifest"] if kind == "manifest" else row["result"], headers=headers)
-    records = row["result"].get("associations", [row["result"]])
+    records = row["result"].get("associations", row["result"].get("records", [row["result"]]))
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=list(records[0]))
     writer.writeheader()
@@ -528,6 +619,8 @@ def metrics(user=Depends(authenticate), connection=Depends(transaction, scope="f
         http_status_classes = dict(_http_status_classes)
     return {"jobs_by_state": states, "workers_online": active, "retries": retries,
             "queue_depth": states.get("QUEUED", 0) + states.get("RETRYING", 0),
+            "queue_capacity": system_limit(),
+            "queue_saturation": sum(states.get(state, 0) for state in ACTIVE + READY) / system_limit(),
             "job_queue_wait_ms": queue_wait,
             "job_execution_ms": execution,
             "job_metrics_window": {"hours": 24, "max_events": METRICS_EVENT_LIMIT},
@@ -548,7 +641,48 @@ def list_projects(user=Depends(authenticate), connection=Depends(transaction, sc
         ).add_columns(memberships.c.role)
     else:
         query = query.add_columns(literal("platform_admin").label("role"))
+    if os.getenv("RESEARCHHUB_DEMO_MODE") == "1":
+        query = query.where(projects.c.id == PROJECT_ID)
     return [dict(row) for row in connection.execute(query.order_by(projects.c.name, projects.c.id)).mappings()]
+
+
+@app.get("/projects/{project_id}/resources")
+def get_resources(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    quota = connection.execute(select(*(projects.c[field] for field in QUOTA_FIELDS)).where(
+        projects.c.id == project,
+    )).mappings().one()
+    return {"quota": dict(quota), "usage": project_usage(connection, project)}
+
+
+@app.put("/projects/{project_id}/resources")
+def update_resources(project_id: UUID, body: ResourceQuotaInput, user=Depends(authenticate),
+                     connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    require_admin(user)
+    scheduling_lock(connection)
+    quota = body.model_dump()
+    usage = project_usage(connection, project)
+    oversized = connection.execute(select(jobs.c.id).where(
+        jobs.c.project_id == project, jobs.c.state.in_(ACTIVE + READY),
+        (jobs.c.cpu_units > body.quota_cpu) | (jobs.c.memory_units > body.quota_memory),
+    ).limit(1)).first()
+    if (oversized or usage["active"] > body.max_concurrent
+            or usage["active"] + usage["queued"] > body.max_queued
+            or usage["cpu_units"] > body.quota_cpu or usage["memory_units"] > body.quota_memory):
+        raise HTTPException(409, "Quota would invalidate outstanding work")
+    updated = connection.execute(projects.update().where(projects.c.id == project).values(**quota))
+    if not updated.rowcount:
+        raise HTTPException(404, "Project not found")
+    log_system_action(connection, user, "project_quota_updated", project)
+    return {"quota": quota, "usage": usage}
+
+
+@app.get("/admin/workers")
+def list_workers(user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    require_admin(user)
+    return [dict(worker) for worker in online_workers(connection, now_ms(connection))]
 
 
 @app.post("/projects/{project_id}/jobs")
@@ -569,11 +703,15 @@ def submit_job(project_id: UUID, body: JobInput,
             )
         parameters = validate_parameters(body.plugin, parameters)
         job = submit(connection, project, key, body.plugin, parameters,
-                     max_attempts=body.max_attempts, timeout_ms=body.timeout_ms, provenance=provenance)
+                     max_attempts=body.max_attempts, timeout_ms=body.timeout_ms, provenance=provenance,
+                     capability=body.capability, cpu_units=body.cpu_units,
+                     memory_units=body.memory_units, priority=body.priority)
     except LookupError as exc:
         raise HTTPException(404, "Dataset version not found") from exc
     except IdempotencyConflict as exc:
         raise HTTPException(409, str(exc)) from exc
+    except QueueFull as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": "1"}) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     log_action(connection, user, project, "job_submission", job["id"])
@@ -585,7 +723,13 @@ def project_jobs(project_id: UUID, user=Depends(authenticate), connection=Depend
     project = str(project_id)
     authorize(connection, user, project, ALL_ROLES)
     query = select(jobs).where(jobs.c.project_id == project).order_by(jobs.c.created_at.desc(), jobs.c.id).limit(100)
-    return [public_job(row) for row in connection.execute(query).mappings()]
+    rows = connection.execute(query).mappings().all()
+    quota = connection.execute(select(projects).where(projects.c.id == project)).mappings().one()
+    usage = project_usage(connection, project)
+    timestamp = now_ms(connection)
+    eligible_workers = online_workers(connection, timestamp)
+    return [dict(public_job(row), wait_reason=wait_reason(row, quota, usage, eligible_workers, timestamp)
+                 if row["state"] in READY else None) for row in rows]
 
 
 @app.get("/projects/{project_id}/jobs/{job_id}/events")
@@ -616,10 +760,9 @@ def start_workflow(project_id: UUID, body: WorkflowInput, user=Depends(authentic
     project = str(project_id)
     authorize(connection, user, project, COMPUTE_ROLES)
     try:
-        definition = body.model_dump()["nodes"]
-        for node in definition.values():
-            node["parameters"] = validate_parameters(node["plugin"], node["parameters"])
-        run_id = start(connection, project, definition)
+        run_id = start(connection, project, prepare_workflow(connection, project, body.nodes))
+    except LookupError as exc:
+        raise HTTPException(404, "Dataset version not found") from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     log_action(connection, user, project, "workflow_started", run_id)
@@ -630,10 +773,168 @@ def start_workflow(project_id: UUID, body: WorkflowInput, user=Depends(authentic
 def list_workflows(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
     project = str(project_id)
     authorize(connection, user, project, ALL_ROLES)
-    query = select(workflow_runs.c.id, workflow_runs.c.state, workflow_runs.c.nodes).where(
+    query = select(workflow_runs.c.id, workflow_runs.c.state, workflow_runs.c.nodes,
+                   workflow_runs.c.version_id, workflow_runs.c.parent_id,
+                   workflow_runs.c.definition_checksum, workflow_runs.c.definition).where(
         workflow_runs.c.project_id == project,
     ).order_by(workflow_runs.c.checked_at.desc(), workflow_runs.c.id).limit(100)
+    return [{**{key: value for key, value in row.items() if key != "definition"},
+             "dependencies": {name: spec["depends_on"] for name, spec in row["definition"].items()}}
+            for row in connection.execute(query).mappings()]
+
+
+@app.post("/projects/{project_id}/research-workflows")
+def run_research_workflow(project_id: UUID, body: ResearchWorkflowInput, user=Depends(authenticate),
+                          connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    enforce_rate_limit("workflow_submission", user["id"], WORKFLOW_SUBMISSION_LIMIT, API_RATE_WINDOW_MS)
+    try:
+        run_id = start_research(connection, storage(), project, str(body.dataset.id), body.dataset.version,
+                                body.discipline, body.timezone)
+    except LookupError as exc:
+        raise HTTPException(404, "Dataset version not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    log_action(connection, user, project, "research_workflow_started", run_id)
+    return {"id": run_id}
+
+
+@app.get("/projects/{project_id}/workflow-templates")
+def list_templates(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    query = select(workflow_definitions).where(workflow_definitions.c.project_id == project)
+    return [dict(row) for row in connection.execute(query.order_by(workflow_definitions.c.name,
+                                                                  workflow_definitions.c.id)).mappings()]
+
+
+@app.get("/projects/{project_id}/workflow-templates/{template_id}/versions")
+def list_workflow_versions(project_id: UUID, template_id: UUID, user=Depends(authenticate),
+                           connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    query = select(workflow_versions).join(workflow_definitions).where(
+        workflow_definitions.c.project_id == project, workflow_definitions.c.id == str(template_id),
+    ).order_by(workflow_versions.c.version.desc())
     return [dict(row) for row in connection.execute(query).mappings()]
+
+
+def publish_template(connection, user, project, body, **template):
+    authorize(connection, user, project, COMPUTE_ROLES)
+    try:
+        definition = prepare_workflow(connection, project, body.nodes, template=True)
+        version = publish(connection, project, definition, body.defaults, **template)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    log_action(connection, user, project, "workflow_version_published", version["id"])
+    return version
+
+
+@app.post("/projects/{project_id}/workflow-templates")
+def create_template(project_id: UUID, body: WorkflowTemplateInput, user=Depends(authenticate),
+                    connection=Depends(transaction, scope="function")):
+    return publish_template(connection, user, str(project_id), body, name=body.name)
+
+
+@app.post("/projects/{project_id}/workflow-templates/{template_id}/versions")
+def add_workflow_version(project_id: UUID, template_id: UUID, body: WorkflowVersionInput,
+                         user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    return publish_template(connection, user, str(project_id), body, definition_id=str(template_id))
+
+
+@app.post("/projects/{project_id}/workflow-versions/{version_id}/runs")
+def run_workflow_version(project_id: UUID, version_id: UUID, body: WorkflowParameters,
+                         user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    try:
+        run_id = start_version(connection, project, str(version_id), body.parameters)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    log_action(connection, user, project, "workflow_started", run_id)
+    return {"id": run_id}
+
+
+@app.get("/projects/{project_id}/workflow-schedules")
+def list_schedules(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    query = select(workflow_schedules).where(workflow_schedules.c.project_id == project)
+    return [dict(row) for row in connection.execute(query.order_by(workflow_schedules.c.next_at,
+                                                                  workflow_schedules.c.id)).mappings()]
+
+
+@app.post("/projects/{project_id}/workflow-versions/{version_id}/schedules")
+def schedule_workflow(project_id: UUID, version_id: UUID, body: WorkflowScheduleInput,
+                      user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    try:
+        schedule = create_schedule(connection, project, str(version_id), body.parameters, body.start_at,
+                                   body.zone, body.interval_seconds)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    log_action(connection, user, project, "workflow_scheduled", schedule["id"])
+    return schedule
+
+
+@app.post("/projects/{project_id}/workflows/{run_id}/cancel")
+def cancel_workflow(project_id: UUID, run_id: UUID, user=Depends(authenticate),
+                    connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    try:
+        state = cancel_run(connection, project, str(run_id))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    log_action(connection, user, project, "workflow_cancelled", str(run_id))
+    return {"state": state}
+
+
+@app.post("/projects/{project_id}/workflows/{run_id}/rerun")
+def rerun_workflow(project_id: UUID, run_id: UUID, body: WorkflowRerunInput, user=Depends(authenticate),
+                   connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, COMPUTE_ROLES)
+    try:
+        child = rerun(connection, project, str(run_id), body.failed_node)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    log_action(connection, user, project, "workflow_rerun", child)
+    return {"id": child}
+
+
+@app.get("/projects/{project_id}/workflows/{run_id}/provenance")
+def workflow_provenance(project_id: UUID, run_id: UUID, download: bool = False, user=Depends(authenticate),
+                         connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    try:
+        document = run_provenance.manifest(connection, project, str(run_id))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    headers = {"Content-Disposition": f'attachment; filename="{run_id}-provenance.json"'} if download else None
+    return JSONResponse(document, headers=headers)
+
+
+@app.get("/projects/{project_id}/workflows/{run_id}/compare/{other_id}")
+def compare_workflow_runs(project_id: UUID, run_id: UUID, other_id: UUID, user=Depends(authenticate),
+                          connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, ALL_ROLES)
+    try:
+        return run_provenance.compare(connection, project, str(run_id), str(other_id))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/projects/{project_id}/funding")

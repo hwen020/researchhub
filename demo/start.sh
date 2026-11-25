@@ -10,21 +10,10 @@ fi
 
 alembic upgrade head
 
-export RESEARCHHUB_FIXTURE_PASSWORD="${RESEARCHHUB_DEMO_PASSWORD:-synthetic-public-demo-only}"
+export RESEARCHHUB_DEMO_MODE=1
+export RESEARCHHUB_DEMO_PASSWORD="${RESEARCHHUB_DEMO_PASSWORD:-synthetic-public-demo-only}"
 export RESEARCHHUB_STORAGE="${RESEARCHHUB_STORAGE:-/tmp/researchhub-artifacts}"
-mkdir -p "$RESEARCHHUB_STORAGE"
-
-if python - <<'PY'
-from sqlalchemy import select
-from researchhub.db import connect
-from researchhub.models import users
-
-with connect().begin() as connection:
-    raise SystemExit(0 if connection.execute(select(users.c.id).limit(1)).first() is None else 1)
-PY
-then
-    python seed_browser_fixture.py
-fi
+python -m researchhub.demo_fixture
 
 nginx
 python -m uvicorn researchhub.api:app --host 127.0.0.1 --port 8000 &

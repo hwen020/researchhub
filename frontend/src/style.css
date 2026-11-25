@@ -41,3 +41,10 @@ td button { margin-right: 6px }
   nav button { white-space: nowrap }
   main { padding-top: 18px }
 }
+.usage-grid, .quota-form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)) }
+.usage-grid dd { margin-left: 0; font-weight: 700 }
+.quota-form label { display: grid; gap: 4px }
+.quota-form input { width: 100% }
+.wait-reason, .workflow li small { display: block }
+.workflow li { overflow-wrap: anywhere; margin-block: 8px }
+.workflow li button { margin-left: 8px }
