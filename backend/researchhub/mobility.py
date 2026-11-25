@@ -40,7 +40,8 @@ def validate_observations(payload):
     if not 2 <= len(rows) <= MAX_ROWS:
         raise ValueError(f"Mobility datasets require 2 to {MAX_ROWS} observations")
     if any(not REQUIRED <= row.keys() or row.keys() - REQUIRED - OPTIONAL for row in rows):
-        raise ValueError("Mobility CSV columns do not match the schema")
+        actual = sorted({name for row in rows for name in row.keys()})
+        raise ValueError("Mobility CSV columns do not match the schema: " + ",".join(actual))
     normalized = [parse_row(row) for row in rows]
     keys = {(row["participant_id"], row["timestamp_utc"]) for row in normalized}
     if len(keys) != len(normalized):
