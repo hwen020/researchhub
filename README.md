@@ -30,7 +30,9 @@ ResearchHub's original implementation is licensed under the MIT License in [LICE
 
 ## Public Demo Mode
 
-The repository includes an independent Render Free Demo blueprint in [render.yaml](render.yaml). It uses a Free Web Service and Free Render PostgreSQL database for synthetic demonstrations.
+Live public Demo: https://researchhub-demo.onrender.com
+
+The repository includes an independent Render Free Demo blueprint in [render.yaml](render.yaml). It uses a Free Web Service and Free Render PostgreSQL database for synthetic demonstrations. The public instance passed HTTPS readiness, synthetic login, browser navigation and a real `summary@1` job: `QUEUED` to `SUCCEEDED` with attempt 1.
 
 The Demo runs the existing API and a local demo worker/scheduler in one web instance. It is not a claim of the full distributed worker architecture or durable artifact storage. `/tmp` artifacts, Free web spin-down/restarter behavior and the 30-day Free PostgreSQL limit do not provide full Compose durability.
 

@@ -22,4 +22,10 @@ A separate demo profile would need explicit limits and no claim of production du
 - Render CLI: not required for the browser-created independent blueprint.
 - Local demo validation: `demo/Dockerfile` built successfully with existing Docker cache. A temporary PostgreSQL database and container passed `/api/readyz`, synthetic login, browser Overview/Jobs, queued submission and worker `SUCCEEDED` state with a real synthetic summary result.
 - Temporary container, database and validation image were removed.
-- Live deployment: pending blueprint creation and public HTTPS acceptance in the authenticated Render account. No existing Render service is to be modified and no paid resource will be purchased.
+- Live deployment: https://researchhub-demo.onrender.com
+- Blueprint sync: `exs-dc348ee8bjmc73egsr90`; Web service `srv-dc34923rjlhs73en2ft0`; commit `1c18d22`.
+- Public HTTPS readiness: PASS, `/api/readyz` returned `{"status":"ready"}`.
+- Public browser login: PASS with the synthetic `fixture-pi` account.
+- Public task execution: PASS. A real `summary@1` job reached `SUCCEEDED` with attempt 1 and synthetic result count 3, min 1, max 3, mean 2 and sample variance 1.
+- Public Jobs view: PASS; Details, Manifest, JSON and CSV actions were present.
+- No existing Render service was modified and no paid resource was purchased.

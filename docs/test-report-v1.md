@@ -12,6 +12,6 @@ The formal release gate remains open.
 | Compose | PASS for container startup with two workers, frontend readiness route, migration head and PostgreSQL recovery. |
 | Browser | PASS. 2 tests passed in 390px Edge: existing project/job/DAG/dataset/download/funding/audit workflow and admin project/account/member/first-login rotation workflow. |
 | GitHub Actions | PASS against public independent repository `hwen020/researchhub`. Run `45529021806` completed successfully with backend, frontend and compose all green for license commit `63532a9`. |
-| Public demo | NOT DEPLOYED. Render login/authorization was unavailable in the current browser session, and no existing Render service was modified. Render Free demo feasibility and public guest isolation remain open. |
+| Public demo | PASS for the isolated Free Demo at https://researchhub-demo.onrender.com. HTTPS readiness, synthetic login, browser Jobs view and real `summary@1` execution passed. This is a one-instance Demo profile, not the full persistent Compose architecture. |
 
 See [development handoff](../DEVELOPMENT_STATUS.md) for remaining release work.
