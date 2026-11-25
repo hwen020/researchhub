@@ -28,6 +28,14 @@ The current 390px Edge browser suite passes 2 tests, the frontend production bui
 
 ResearchHub's original implementation is licensed under the MIT License in [LICENSE](LICENSE). Third-party notices and source attribution are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Aging Genomics MIT license remains in [docs/aging-genomics-LICENSE.txt](docs/aging-genomics-LICENSE.txt). The license applies only as documented and does not relicense any inspected third-party work.
 
+## Public Demo Mode
+
+The repository includes an independent Render Free Demo blueprint in [render.yaml](render.yaml). It uses a Free Web Service and Free Render PostgreSQL database for synthetic demonstrations.
+
+The Demo runs the existing API and a local demo worker/scheduler in one web instance. It is not a claim of the full distributed worker architecture or durable artifact storage. `/tmp` artifacts, Free web spin-down/restarter behavior and the 30-day Free PostgreSQL limit do not provide full Compose durability.
+
+For a local demo image check, build `demo/Dockerfile`. The synthetic browser fixture is `fixture-pi` / `synthetic-public-demo-only` and must not be reused outside an isolated demo environment.
+
 ## Tests
 
 From `backend`, install `requirements-dev.txt`. Set `DATABASE_URL` and `RESEARCHHUB_TEST_DATABASE` to a disposable PostgreSQL database and run `alembic upgrade head`, `alembic check` and `python -m pytest -q`. From `frontend`, run `npm ci` and `npm run build`. Browser smoke tests use Playwright against an isolated Compose stack with synthetic fixture accounts.

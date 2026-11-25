@@ -17,8 +17,9 @@ A separate demo profile would need explicit limits and no claim of production du
 
 ## Current attempt
 
-- Independent repository: created privately at `https://github.com/hwen020/researchhub`.
-- Render account: no authenticated dashboard session was available.
-- Render CLI: no usable authenticated CLI session was found.
-- Live deployment: NOT CREATED. No existing Render service was modified and no paid resource was purchased.
-- Remaining blocker: Render account login/authorization is required to create an independent demo resource and verify HTTPS/public behavior.
+- Independent repository: public at `https://github.com/hwen020/researchhub`.
+- Render account: authenticated dashboard session is available.
+- Render CLI: not required for the browser-created independent blueprint.
+- Local demo validation: `demo/Dockerfile` built successfully with existing Docker cache. A temporary PostgreSQL database and container passed `/api/readyz`, synthetic login, browser Overview/Jobs, queued submission and worker `SUCCEEDED` state with a real synthetic summary result.
+- Temporary container, database and validation image were removed.
+- Live deployment: pending blueprint creation and public HTTPS acceptance in the authenticated Render account. No existing Render service is to be modified and no paid resource will be purchased.

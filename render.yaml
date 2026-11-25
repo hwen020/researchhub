@@ -1,0 +1,25 @@
+databases:
+  - name: researchhub-demo-db
+    databaseName: researchhub
+    user: researchhub
+    plan: free
+
+services:
+  - type: web
+    name: researchhub-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./demo/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: researchhub-demo-db
+          property: connectionString
+      - key: RESEARCHHUB_DEMO_PASSWORD
+        value: synthetic-public-demo-only
+      - key: RESEARCHHUB_STORAGE
+        value: /tmp/researchhub-artifacts
+      - key: RESEARCHHUB_CODE_VERSION
+        value: render-free-demo
