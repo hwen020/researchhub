@@ -21,6 +21,7 @@ users = Table(
     Column("username", String(100), nullable=False, unique=True),
     Column("password_hash", String(256), nullable=False),
     Column("platform_admin", Integer, nullable=False, default=0),
+    Column("must_change_password", Integer, nullable=False, default=0),
 )
 memberships = Table(
     "memberships", metadata,
@@ -123,6 +124,14 @@ audit = Table(
     "audit_events", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("project_id", ForeignKey("projects.id"), nullable=False, index=True),
+    Column("actor_id", ForeignKey("users.id"), nullable=False),
+    Column("action", String(40), nullable=False),
+    Column("subject_id", String(36), nullable=False),
+    Column("timestamp", BigInteger, nullable=False),
+)
+system_audit = Table(
+    "system_audit_events", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
     Column("actor_id", ForeignKey("users.id"), nullable=False),
     Column("action", String(40), nullable=False),
     Column("subject_id", String(36), nullable=False),

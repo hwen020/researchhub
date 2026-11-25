@@ -1,6 +1,7 @@
 import csv
 import io
 import os
+import secrets
 from typing import Dict, List, Literal
 from uuid import UUID, uuid4
 
@@ -9,12 +10,13 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, literal, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 
 from .auth import hash_password, require_project, verify_password
 from .db import connect
 from .finance import decide, request_funds
-from .models import audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, users, versions, workers, workflow_runs
+from .models import audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, system_audit, users, versions, workers, workflow_runs
 from .plugins import validate_parameters
 from .queue import IdempotencyConflict, cancel, now_ms, submit
 from .registry import MAX_UPLOAD, compute_inputs, download, register, upload
@@ -70,6 +72,29 @@ class DatasetInput(RequestModel):
     name: str = Field(min_length=1, max_length=200)
 
 
+class ProjectInput(RequestModel):
+    organization_id: UUID = Field(strict=False)
+    name: str = Field(min_length=1, max_length=200)
+    budget_limit: int = Field(ge=0, le=10**12)
+
+
+class AccountInput(RequestModel):
+    username: str = Field(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
+
+
+class MembershipInput(RequestModel):
+    username: str = Field(min_length=3, max_length=100)
+    role: Literal["pi", "researcher", "finance"]
+
+
+class MemberRoleInput(RequestModel):
+    role: Literal["pi", "researcher", "finance"]
+
+
+class PasswordInput(RequestModel):
+    password: str = Field(min_length=12, max_length=256)
+
+
 def transaction():
     try:
         with engine.begin() as connection:
@@ -78,7 +103,7 @@ def transaction():
         raise HTTPException(503, "Database unavailable") from exc
 
 
-def authenticate(credentials: HTTPBasicCredentials | None = Depends(security), connection=Depends(transaction, scope="function")):
+def authenticate(request: Request, credentials: HTTPBasicCredentials | None = Depends(security), connection=Depends(transaction, scope="function")):
     user = None
     password = "missing credential"
     if credentials is not None:
@@ -86,6 +111,8 @@ def authenticate(credentials: HTTPBasicCredentials | None = Depends(security), c
         password = credentials.password
     if not verify_password(password, user["password_hash"] if user else dummy_hash) or user is None:
         raise HTTPException(401, "Invalid credentials")
+    if user["must_change_password"] and request.url.path not in {"/auth/status", "/auth/password"}:
+        raise HTTPException(403, "Password change required")
     return user
 
 
@@ -107,6 +134,166 @@ def log_action(connection, user, project, action, subject):
         project_id=project, actor_id=user["id"], action=action,
         subject_id=subject, timestamp=now_ms(connection),
     ))
+
+
+def log_system_action(connection, user, action, subject):
+    connection.execute(system_audit.insert().values(
+        actor_id=user["id"], action=action, subject_id=subject,
+        timestamp=now_ms(connection),
+    ))
+
+
+def require_admin(user):
+    if not user["platform_admin"]:
+        raise HTTPException(403, "Platform administrator required")
+
+
+@app.get("/auth/status")
+def auth_status(user=Depends(authenticate)):
+    return {"platform_admin": bool(user["platform_admin"]),
+            "must_change_password": bool(user["must_change_password"])}
+
+
+@app.post("/auth/password")
+def change_password(body: PasswordInput, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    connection.execute(users.update().where(users.c.id == user["id"]).values(
+        password_hash=hash_password(body.password), must_change_password=0,
+    ))
+    log_system_action(connection, user, "password_changed", user["id"])
+    return {"must_change_password": False}
+
+
+@app.get("/admin/organizations")
+def admin_organizations(user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    require_admin(user)
+    query = select(organizations.c.id, organizations.c.name).order_by(organizations.c.name)
+    return [dict(row) for row in connection.execute(query).mappings()]
+
+
+@app.post("/admin/projects")
+def admin_create_project(body: ProjectInput, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    require_admin(user)
+    organization_id = str(body.organization_id)
+    if connection.execute(select(organizations.c.id).where(organizations.c.id == organization_id)).scalar_one_or_none() is None:
+        raise HTTPException(404, "Organization not found")
+    duplicate = connection.execute(select(projects.c.id).where(
+        projects.c.organization_id == organization_id, projects.c.name == body.name,
+    )).scalar_one_or_none()
+    if duplicate is not None:
+        raise HTTPException(409, "Project already exists")
+    project_id = str(uuid4())
+    connection.execute(projects.insert().values(
+        id=project_id, organization_id=organization_id, name=body.name,
+    ))
+    connection.execute(budgets.insert().values(project_id=project_id, limit=body.budget_limit, spent=0))
+    log_action(connection, user, project_id, "project_created", project_id)
+    return {"id": project_id, "name": body.name}
+
+
+@app.post("/admin/accounts")
+def admin_create_account(body: AccountInput, response: Response,
+                         user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    require_admin(user)
+    account_id = str(uuid4())
+    temporary_password = secrets.token_urlsafe(24)
+    inserted = connection.execute(pg_insert(users).values(
+        id=account_id, username=body.username, password_hash=hash_password(temporary_password),
+        platform_admin=0, must_change_password=1,
+    ).on_conflict_do_nothing(index_elements=[users.c.username])).rowcount
+    if not inserted:
+        raise HTTPException(409, "Username already exists")
+    log_system_action(connection, user, "account_created", account_id)
+    response.headers["Cache-Control"] = "no-store"
+    return {"username": body.username, "temporary_password": temporary_password}
+
+
+@app.get("/admin/audit")
+def admin_audit(user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    require_admin(user)
+    query = select(system_audit).order_by(system_audit.c.id.desc()).limit(100)
+    return [dict(row) for row in connection.execute(query).mappings()]
+
+
+@app.get("/projects/{project_id}/members")
+def project_members(project_id: UUID, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, {"pi"})
+    query = select(users.c.username, memberships.c.role).join(
+        memberships, memberships.c.user_id == users.c.id,
+    ).where(memberships.c.project_id == project).order_by(users.c.username)
+    return [dict(row) for row in connection.execute(query).mappings()]
+
+
+@app.post("/projects/{project_id}/members")
+def add_project_member(project_id: UUID, body: MembershipInput, user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, {"pi"})
+    if body.role == "pi" and not user["platform_admin"]:
+        raise HTTPException(403, "Only a platform administrator can grant PI role")
+    member = connection.execute(select(users.c.id).where(users.c.username == body.username)).scalar_one_or_none()
+    if member is None:
+        raise HTTPException(404, "Account not found")
+    if member == user["id"] and not user["platform_admin"]:
+        raise HTTPException(403, "Cannot add yourself as a project member")
+    inserted = connection.execute(pg_insert(memberships).values(
+        project_id=project, user_id=member, role=body.role,
+    ).on_conflict_do_nothing(index_elements=[memberships.c.project_id, memberships.c.user_id])).rowcount
+    if not inserted:
+        raise HTTPException(409, "Account is already a project member")
+    log_action(connection, user, project, "membership_added", member)
+    return {"username": body.username, "role": body.role}
+
+
+@app.patch("/projects/{project_id}/members/{username}")
+def update_project_member(project_id: UUID, username: str, body: MemberRoleInput,
+                          user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, {"pi"})
+    connection.execute(select(projects.c.id).where(projects.c.id == project).with_for_update()).scalar_one()
+    member = connection.execute(select(users.c.id, memberships.c.role).join(
+        memberships, memberships.c.user_id == users.c.id,
+    ).where(memberships.c.project_id == project, users.c.username == username).with_for_update()).mappings().one_or_none()
+    if member is None:
+        raise HTTPException(404, "Project member not found")
+    if not user["platform_admin"] and (member["id"] == user["id"] or member["role"] == "pi" or body.role == "pi"):
+        raise HTTPException(403, "Project PI role changes require a platform administrator")
+    if member["role"] == "pi" and body.role != "pi":
+        pi_count = connection.execute(select(func.count()).select_from(memberships).where(
+            memberships.c.project_id == project, memberships.c.role == "pi",
+        )).scalar_one()
+        if pi_count <= 1:
+            raise HTTPException(409, "A project must retain at least one PI")
+    connection.execute(memberships.update().where(
+        memberships.c.project_id == project, memberships.c.user_id == member["id"],
+    ).values(role=body.role))
+    log_action(connection, user, project, "membership_role_changed", member["id"])
+    return {"username": username, "role": body.role}
+
+
+@app.delete("/projects/{project_id}/members/{username}")
+def remove_project_member(project_id: UUID, username: str,
+                          user=Depends(authenticate), connection=Depends(transaction, scope="function")):
+    project = str(project_id)
+    authorize(connection, user, project, {"pi"})
+    connection.execute(select(projects.c.id).where(projects.c.id == project).with_for_update()).scalar_one()
+    member = connection.execute(select(users.c.id, memberships.c.role).join(
+        memberships, memberships.c.user_id == users.c.id,
+    ).where(memberships.c.project_id == project, users.c.username == username).with_for_update()).mappings().one_or_none()
+    if member is None:
+        raise HTTPException(404, "Project member not found")
+    if not user["platform_admin"] and (member["id"] == user["id"] or member["role"] == "pi"):
+        raise HTTPException(403, "Project PI membership changes require a platform administrator")
+    if member["role"] == "pi":
+        pi_count = connection.execute(select(func.count()).select_from(memberships).where(
+            memberships.c.project_id == project, memberships.c.role == "pi",
+        )).scalar_one()
+        if pi_count <= 1:
+            raise HTTPException(409, "A project must retain at least one PI")
+    connection.execute(memberships.delete().where(
+        memberships.c.project_id == project, memberships.c.user_id == member["id"],
+    ))
+    log_action(connection, user, project, "membership_removed", member["id"])
+    return {"removed": username}
 
 
 @app.get("/projects/{project_id}/audit")

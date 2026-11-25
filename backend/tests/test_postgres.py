@@ -14,7 +14,7 @@ from sqlalchemy.engine import make_url
 from researchhub.db import connect
 from researchhub.finance import decide, request_funds
 from researchhub.auth import hash_password
-from researchhub.models import budgets, events, jobs, memberships, metadata, organizations, projects, users
+from researchhub.models import budgets, events, jobs, memberships, metadata, organizations, projects, system_audit, users
 from researchhub.queue import cancel, claim, finish, submit
 from researchhub.models import workflow_runs
 from researchhub.workflows import start
@@ -146,6 +146,91 @@ class PostgresIntegration(unittest.TestCase):
                 self.assertEqual(client.get(path, auth=outsider).status_code, 404)
             actions = {entry["action"] for entry in client.get(base + "/audit", auth=owner).json()}
             self.assertEqual(actions, {"dataset_registered", "dataset_uploaded", "job_submission", "job_artifact_download"})
+
+    def test_admin_account_rotation_and_project_member_audit(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from researchhub import api
+
+        organization, admin_id, pi_id = (str(uuid4()) for _ in range(3))
+        admin_password, pi_password, changed_password = "admin fixture password", "project pi fixture password", "changed fixture password"
+        with self.engine.begin() as conn:
+            conn.execute(organizations.insert().values(id=organization, name="Admin fixture lab"))
+            conn.execute(users.insert(), [
+                {"id": admin_id, "username": "fixture-admin", "password_hash": hash_password(admin_password), "platform_admin": 1},
+                {"id": pi_id, "username": "fixture-pi-admin", "password_hash": hash_password(pi_password), "platform_admin": 0},
+            ])
+
+        with patch.object(api, "engine", self.engine), TestClient(api.app) as client:
+            admin = ("fixture-admin", admin_password)
+            pi = ("fixture-pi-admin", pi_password)
+            created = client.post("/admin/projects", json={
+                "organization_id": organization, "name": "Managed fixture", "budget_limit": 1000,
+            }, auth=admin)
+            self.assertEqual(created.status_code, 200, created.text)
+            project = created.json()["id"]
+            with self.engine.begin() as conn:
+                conn.execute(memberships.insert().values(project_id=project, user_id=pi_id, role="pi"))
+
+            account = client.post("/admin/accounts", json={"username": "fixture-new-member"}, auth=admin)
+            self.assertEqual(account.status_code, 200, account.text)
+            self.assertEqual(account.headers.get("cache-control"), "no-store")
+            temporary = account.json()["temporary_password"]
+            pending = ("fixture-new-member", temporary)
+            self.assertTrue(client.get("/auth/status", auth=pending).json()["must_change_password"])
+            self.assertEqual(client.get("/projects", auth=pending).status_code, 403)
+            self.assertEqual(client.post("/auth/password", json={"password": changed_password}, auth=pending).status_code, 200)
+            member = ("fixture-new-member", changed_password)
+
+            base = "/projects/" + project + "/members"
+            self.assertEqual(client.post(base, json={"username": member[0], "role": "researcher"}, auth=pi).status_code, 200)
+            self.assertEqual(client.post(base, json={"username": member[0], "role": "pi"}, auth=pi).status_code, 403)
+            self.assertEqual(client.patch(base + "/" + member[0], json={"role": "finance"}, auth=pi).status_code, 200)
+            self.assertEqual(client.delete(base + "/" + member[0], auth=pi).status_code, 200)
+            self.assertEqual(client.delete(base + "/fixture-pi-admin", auth=admin).status_code, 409)
+
+            project_actions = {row["action"] for row in client.get("/projects/" + project + "/audit", auth=pi).json()}
+            self.assertEqual(project_actions, {"project_created", "membership_added", "membership_role_changed", "membership_removed"})
+            with self.engine.begin() as conn:
+                system_actions = set(conn.execute(select(system_audit.c.action)).scalars())
+                self.assertEqual(system_actions, {"account_created", "password_changed"})
+
+    def test_concurrent_pi_removals_preserve_one_project_pi(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from researchhub import api
+
+        organization, project, admin_id, first_pi, second_pi = (str(uuid4()) for _ in range(5))
+        admin_password = "admin fixture password"
+        with self.engine.begin() as conn:
+            conn.execute(organizations.insert().values(id=organization, name="Concurrent PI fixture"))
+            conn.execute(projects.insert().values(id=project, organization_id=organization, name="PI guard"))
+            conn.execute(budgets.insert().values(project_id=project, limit=0, spent=0))
+            conn.execute(users.insert(), [
+                {"id": admin_id, "username": "fixture-pi-guard-admin", "password_hash": hash_password(admin_password), "platform_admin": 1},
+                {"id": first_pi, "username": "fixture-first-pi", "password_hash": "fixture"},
+                {"id": second_pi, "username": "fixture-second-pi", "password_hash": "fixture"},
+            ])
+            conn.execute(memberships.insert(), [
+                {"project_id": project, "user_id": first_pi, "role": "pi"},
+                {"project_id": project, "user_id": second_pi, "role": "pi"},
+            ])
+
+        def remove(username):
+            with TestClient(api.app) as client:
+                return client.delete(
+                    f"/projects/{project}/members/{username}",
+                    auth=("fixture-pi-guard-admin", admin_password),
+                ).status_code
+
+        with patch.object(api, "engine", self.engine), ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(remove, ("fixture-first-pi", "fixture-second-pi")))
+        self.assertCountEqual(outcomes, [200, 409])
+        with self.engine.begin() as conn:
+            remaining = conn.execute(select(func.count()).select_from(memberships).where(
+                memberships.c.project_id == project, memberships.c.role == "pi",
+            )).scalar_one()
+        self.assertEqual(remaining, 1)
 
     def test_invalid_basic_auth_returns_json_without_browser_challenge(self):
         from unittest.mock import patch

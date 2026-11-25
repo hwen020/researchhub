@@ -17,13 +17,16 @@ def seed():
     with connect().begin() as conn:
         if conn.execute(select(users.c.id).limit(1)).first():
             raise SystemExit("Browser fixtures require an empty synthetic test database")
-        organization, primary, secondary, pi, finance = (str(uuid4()) for _ in range(5))
+        organization, primary, secondary, pi, finance, admin = (str(uuid4()) for _ in range(6))
         conn.execute(organizations.insert().values(id=organization, name="Fixture Lab"))
         for project, name in ((primary, "Primary fixture"), (secondary, "Secondary fixture")):
             conn.execute(projects.insert().values(id=project, organization_id=organization, name=name))
             conn.execute(budgets.insert().values(project_id=project, limit=5000))
-        for user, label in ((pi, "pi"), (finance, "finance")):
-            conn.execute(users.insert().values(id=user, username="fixture-" + label, password_hash=hash_password(secret)))
+        for user, label, platform_admin in ((pi, "pi", 0), (finance, "finance", 0), (admin, "admin", 1)):
+            conn.execute(users.insert().values(
+                id=user, username="fixture-" + label, password_hash=hash_password(secret),
+                platform_admin=platform_admin,
+            ))
         conn.execute(memberships.insert(), [
             {"project_id": primary, "user_id": pi, "role": "pi"},
             {"project_id": secondary, "user_id": pi, "role": "researcher"},

@@ -6,11 +6,13 @@ type Project = { id: string, name: string, organization: string, role: string }
 type Job = { id: string, state: string, plugin: string, attempt: number, result: unknown }
 type Workflow = { id: string, state: string, nodes: Record<string, { state: string }> }
 type Dataset = { id: string, name: string }
+type Organization = { id: string, name: string }
+type Member = { username: string, role: 'pi' | 'researcher' | 'finance' }
 type Funding = {
   budget: { limit: number, spent: number },
   requests: { id: string, purpose: string, amount: number, state: string }[],
 }
-const sections = ['Overview', 'Jobs', 'Workflows', 'Datasets', 'Funding', 'Audit', 'System health'] as const
+const sections = ['Overview', 'Jobs', 'Workflows', 'Datasets', 'Funding', 'Members', 'Audit', 'System health', 'Administration'] as const
 type Section = typeof sections[number]
 
 function Workspace() {
@@ -22,10 +24,17 @@ function Workspace() {
   const [workflows, setWorkflows] = useState<Workflow[]>([])
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [funding, setFunding] = useState<Funding | null>(null)
+  const [members, setMembers] = useState<Member[]>([])
+  const [memberRoles, setMemberRoles] = useState<Record<string, Member['role']>>({})
+  const [organizations, setOrganizations] = useState<Organization[]>([])
   const [details, setDetails] = useState<unknown>(null)
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
   const [observations, setObservations] = useState('1, 2, 3, 4')
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [pendingAuthorization, setPendingAuthorization] = useState('')
+  const [pendingUsername, setPendingUsername] = useState('')
+  const [temporaryPassword, setTemporaryPassword] = useState('')
   const project = projects.find((item) => item.id === projectId)
 
   async function api<T>(path: string, init?: RequestInit, authorization = token): Promise<T> {
@@ -47,12 +56,22 @@ function Workspace() {
         setDetails({ readiness, execution: await api('/metrics').catch(() => null) })
         return
       }
+      if (section === 'Administration') {
+        setOrganizations(await api<Organization[]>('/admin/organizations'))
+        setDetails(await api('/admin/audit'))
+        return
+      }
       if (!projectId) return
       const base = '/projects/' + projectId
       if (section === 'Overview' || section === 'Jobs') setJobs(await api<Job[]>(base + '/jobs'))
       if (section === 'Overview' || section === 'Workflows') setWorkflows(await api<Workflow[]>(base + '/workflows'))
       if (section === 'Datasets') setDatasets(await api<Dataset[]>(base + '/datasets'))
       if (section === 'Funding') setFunding(await api<Funding>(base + '/funding'))
+      if (section === 'Members') {
+        const currentMembers = await api<Member[]>(base + '/members')
+        setMembers(currentMembers)
+        setMemberRoles(Object.fromEntries(currentMembers.map((member) => [member.username, member.role])))
+      }
       if (section === 'Audit') setDetails(await api(base + '/audit'))
     } catch (error) {
       setStatus(String(error))
@@ -103,21 +122,52 @@ function Workspace() {
 
   return <div className="shell">
     <aside><div className="brand"><span>R</span> ResearchHub</div>
-      {token && <nav aria-label="Workspace">{sections.map((item) =>
+      {token && <nav aria-label="Workspace">{sections.filter((item) =>
+        (item !== 'Administration' || isAdmin) &&
+        (item !== 'Members' || ['pi', 'platform_admin'].includes(project?.role ?? ''))
+      ).map((item) =>
         <button className={item === section ? 'selected' : ''} key={item} onClick={() => setSection(item)}>{item}</button>
       )}</nav>}
     </aside>
     <main>
       <header><div><p className="eyebrow">{project?.organization ?? 'Research workspace'}</p>
         <h1>{token ? section : 'Sign in'}</h1></div>
-        {token && <button onClick={() => { setToken(''); setProjectId(''); setProjects([]); setStatus(''); setSection('Overview') }}>Sign out</button>}
+        {token && <button onClick={() => {
+          setToken(''); setProjectId(''); setProjects([]); setStatus(''); setSection('Overview')
+          setIsAdmin(false); setTemporaryPassword(''); setDetails(null)
+        }}>Sign out</button>}
       </header>
       {status && <p role="alert" className="status">{status}</p>}
-      {!token ? <form className="panel sign-in" onSubmit={(event) => {
+      {!token && pendingAuthorization ? <form className="panel sign-in" onSubmit={(event) => {
+        event.preventDefault()
+        const password = String(new FormData(event.currentTarget).get('password'))
+        void run(async () => {
+          await api('/auth/password', {
+            method: 'POST', body: JSON.stringify({ password }),
+            headers: { 'Content-Type': 'application/json' },
+          }, pendingAuthorization)
+          const authorization = btoa(pendingUsername + ':' + password)
+          const available = await api<Project[]>('/projects', undefined, authorization)
+          const authStatus = await api<{ platform_admin: boolean }>('/auth/status', undefined, authorization)
+          setProjects(available); setProjectId(available[0]?.id ?? ''); setIsAdmin(authStatus.platform_admin)
+          setPendingAuthorization(''); setPendingUsername(''); setToken(authorization)
+        })
+      }}>
+        <p>A temporary password must be changed before continuing.</p>
+        <label>New password<input name="password" type="password" minLength={12} maxLength={256} required autoComplete="new-password" /></label>
+        <button className="primary">Change password</button>
+      </form> : !token ? <form className="panel sign-in" onSubmit={(event) => {
         event.preventDefault()
         const form = new FormData(event.currentTarget)
         void run(async () => {
           const authorization = btoa(String(form.get('user')) + ':' + String(form.get('password')))
+          const authStatus = await api<{ platform_admin: boolean, must_change_password: boolean }>('/auth/status', undefined, authorization)
+          setIsAdmin(authStatus.platform_admin)
+          if (authStatus.must_change_password) {
+            setPendingAuthorization(authorization); setPendingUsername(String(form.get('user')))
+            setStatus('A temporary password must be changed before continuing.')
+            return
+          }
           const available = await api<Project[]>('/projects', undefined, authorization)
           setProjects(available); setProjectId(available[0]?.id ?? ''); setToken(authorization)
         })
@@ -192,6 +242,91 @@ function Workspace() {
           </li>)}</ul>
           {funding.requests.length === 0 && <p>No funding requests.</p>}
         </section>}
+        {section === 'Members' && projectId && <section className="panel">
+          <h2>Project members</h2>
+          <form className="action" onSubmit={(event) => {
+            event.preventDefault()
+            const form = new FormData(event.currentTarget)
+            void run(async () => {
+              await api('/projects/' + projectId + '/members', {
+                method: 'POST', body: JSON.stringify({ username: form.get('username'), role: form.get('role') }),
+                headers: { 'Content-Type': 'application/json' },
+              })
+              await refresh()
+            })
+          }}>
+            <label>Username<input name="username" minLength={3} maxLength={100} required /></label>
+            <label>Role<select name="role"><option value="researcher">researcher</option><option value="finance">finance</option>
+              {isAdmin && <option value="pi">pi</option>}
+            </select></label>
+            <button className="primary">Add member</button>
+          </form>
+          <ul>{members.map((member) => <li key={member.username}>
+            <span>{member.username}</span>
+            <select aria-label={'Role for ' + member.username} value={memberRoles[member.username] ?? member.role}
+              onChange={(event) => setMemberRoles({ ...memberRoles, [member.username]: event.target.value as Member['role'] })}>
+              <option value="researcher">researcher</option><option value="finance">finance</option>
+              {isAdmin && <option value="pi">pi</option>}
+            </select>
+            <button onClick={() => void run(async () => {
+              await api('/projects/' + projectId + '/members/' + encodeURIComponent(member.username), {
+                method: 'PATCH', body: JSON.stringify({ role: memberRoles[member.username] ?? member.role }),
+                headers: { 'Content-Type': 'application/json' },
+              })
+              await refresh()
+            })}>Save role</button>
+            <button onClick={() => void run(async () => {
+              await api('/projects/' + projectId + '/members/' + encodeURIComponent(member.username), { method: 'DELETE' })
+              await refresh()
+            })}>Remove</button>
+          </li>)}</ul>
+        </section>}
+        {section === 'Administration' && isAdmin && <>
+          <section className="panel">
+            <h2>Create project</h2>
+            <form className="action" onSubmit={(event) => {
+              event.preventDefault()
+              const form = new FormData(event.currentTarget)
+              void run(async () => {
+                const created = await api<{ id: string }>('/admin/projects', {
+                  method: 'POST', body: JSON.stringify({
+                    organization_id: form.get('organization'), name: form.get('name'), budget_limit: Number(form.get('budget')),
+                  }), headers: { 'Content-Type': 'application/json' },
+                })
+                const available = await api<Project[]>('/projects')
+                setProjects(available); setProjectId(created.id); setSection('Overview')
+              })
+            }}>
+              <label>Organization<select name="organization" required>{organizations.map((organization) =>
+                <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></label>
+              <label>Project<input name="name" minLength={1} maxLength={200} required /></label>
+              <label>Budget limit<input name="budget" type="number" min="0" max="1000000000000" required /></label>
+              <button className="primary">Create project</button>
+            </form>
+          </section>
+          <section className="panel">
+            <h2>Create account</h2>
+            <form className="action" onSubmit={(event) => {
+              event.preventDefault()
+              const formElement = event.currentTarget
+              const form = new FormData(formElement)
+              void run(async () => {
+                const created = await api<{ username: string, temporary_password: string }>('/admin/accounts', {
+                  method: 'POST', body: JSON.stringify({ username: form.get('username') }),
+                  headers: { 'Content-Type': 'application/json' },
+                })
+                setTemporaryPassword(created.username + ': ' + created.temporary_password)
+                formElement.reset()
+              })
+            }}>
+              <label>Username<input name="username" minLength={3} maxLength={100} pattern="[A-Za-z0-9._-]+" required /></label>
+              <button className="primary">Create account</button>
+            </form>
+            {temporaryPassword && <p role="status">One-time password: <code>{temporaryPassword}</code>
+              <button onClick={() => setTemporaryPassword('')}>Dismiss</button>
+            </p>}
+          </section>
+        </>}
         {details !== null && <pre className="panel">{JSON.stringify(details, null, 2)}</pre>}
       </>}
     </main>
