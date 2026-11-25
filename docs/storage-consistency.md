@@ -27,3 +27,11 @@ docker compose exec scheduler python -m researchhub.artifacts cleanup-orphans
 ```
 
 Run the same command with the S3 Compose file and profile when using that backend. An Alembic downgrade through 0009 removes artifact references and staged payloads. Back up the database and retain the matching object namespace before a downgrade.
+
+Reproduce the process termination test with an installed VersityGW binary and a dedicated PostgreSQL test URL. From the repository root:
+
+```sh
+PYTHONPATH=backend python scripts/verify_s3_restart.py /path/to/versitygw
+```
+
+Set `RESEARCHHUB_TEST_DATABASE` first. The harness uses its own disposable PostgreSQL schema, loopback port and temporary object directory.

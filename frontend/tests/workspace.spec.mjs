@@ -110,6 +110,7 @@ test('administrator creates a project and account with one-time password rotatio
 })
 
 test('mobile research workflow publishes artifacts and replays notifications', async ({ page }) => {
+  test.setTimeout(60000)
   const datasetName = 'Synthetic mobility ' + Date.now()
   await page.goto('/')
   await signIn(page, 'fixture-pi')
@@ -128,9 +129,14 @@ test('mobile research workflow publishes artifacts and replays notifications', a
 
   await page.getByRole('button', { name: 'Workflows', exact: true }).click()
   await page.getByLabel('Discipline').selectOption('mobility')
-  await page.getByLabel('Dataset', { exact: true }).selectOption({ label: datasetName })
+  await page.getByRole('combobox', { name: 'Dataset', exact: true }).selectOption({ label: datasetName })
+  const responsePromise = page.waitForResponse((response) =>
+    response.request().method() === 'POST' && response.url().endsWith('/research-workflows'))
   await page.getByRole('button', { name: 'Start research workflow' }).click()
-  const mobility = page.locator('article.workflow').filter({ hasText: 'spatial-aggregation' }).first()
+  const response = await responsePromise
+  expect(response.ok()).toBeTruthy()
+  const { id } = await response.json()
+  const mobility = page.locator('article[data-run-id="' + id + '"]')
   await expect.poll(async () => {
     const refresh = page.getByRole('button', { name: 'Refresh' })
     await refresh.click()

@@ -454,7 +454,7 @@ function Workspace() {
           {workflows.map((workflow) => {
             const path = projectPath + '/workflows/' + workflow.id
             const canRerun = canCompute && ['FAILED', 'CANCELLED'].includes(workflow.state)
-            return <article className="panel workflow" key={workflow.id}>
+            return <article className="panel workflow" key={workflow.id} data-run-id={workflow.id}>
               <h2>{isDemo ? 'Synthetic genomics workflow' : 'Workflow run'} <span className="badge">{workflow.state}</span></h2>
               <div className="action">
                 <button onClick={() => void run(async () => setDetails(await api(path + '/provenance')))}>Provenance</button>

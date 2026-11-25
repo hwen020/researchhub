@@ -2,15 +2,16 @@
 
 | Area | Current evidence | Remaining |
 | --- | --- | --- |
-| Baseline | Base `b7afbbe`, local v1 tag, successful baseline Actions run `45531997808`, HTTP 200 from live readiness | Verify authenticated Render deploy and Blueprint settings |
-| Demo | Read-only fixed guest and synthetic Genomics workflow pass locally against PostgreSQL and independent workers | Verify the candidate Render image and live deployment |
-| Scheduler | PostgreSQL concurrency, three-project rotation, aging, capability matching, backpressure, cancellation and v1 recovery regressions pass | Benchmark mixed multi-project workload and run full Compose acceptance |
-| Advanced DAG | Versioning, conditional branching, local rerun, scheduled deduplication, cancellation and provenance pass | Browser verification of the v2 panels |
-| Research | Five-stage Genomics and Mobility DAGs finish with dataset lineage and authorized exports | Acceptance in final infrastructure profile |
-| Migrations | Populated 0006 schema upgraded to 0008 with no drift and retained legacy workflow execution | Final current-head and downgrade validation |
-| Observability | Queue saturation, project usage, worker availability and existing event metrics | Correlation, tracing, monitoring and new benchmarks |
-| Object storage | Local and VersityGW S3. Real conditional PUT, connection failure, PostgreSQL publication rollback, retry, missing-object detection and orphan cleanup verified | Final infrastructure profile and full service stop/start test |
-| Notifications and backends | Independent subprocess workers remain operational | Persistent notifications and unified backend contract |
-| Release | TypeScript and production bundle passed locally | Public branch CI, final privacy and license audit, v2 release and Render update |
+| Baseline isolation | Main at `b7afbbe`, v1 tag points to `63532a9`, v2 work on `feature/researchhub-v2` | Confirm authenticated Render settings |
+| Demo | Read-only fixed guest and five-stage synthetic Genomics pipeline verified with PostgreSQL and independent Workers. Current public URL returned HTTP 200 once during baseline review | Verify current host settings, deploy accepted candidate and rerun the public smoke check |
+| Scheduler | 36-test local suite exercises project rotation, aging, concurrent reservation, matching, cancellation, stale tokens and backpressure | Eight-Worker scaling only if host resources allow |
+| Workflow | Fixed version binding, conditions, local rerun, scheduled trigger deduplication, cancellation and lineage passed | Per-workload stress with longer schedules |
+| Research | Both five-stage pipelines finish with dataset and upstream provenance. Mobility exports test 0.111 km, 60 steps and one outlier | Public Genomics acceptance after controlled deployment |
+| Storage | Local and VersityGW S3 verified for conditional writes, PostgreSQL rollback, missing-object detection, orphan cleanup, quota and actual S3 process stop/restart | Operate dedicated deployment-profile stress if required for release |
+| Operations | Event metrics, trace IDs, project notifications, replay and read receipts. Local worker backend retains lease semantics | Prometheus/Grafana runtime qualification for optional monitoring |
+| Migrations | Populated v1 schema upgrades to 0012 without model drift. Isolated mixed benchmark schemas install from empty | Back up before a production deployment |
+| Browser and Compose | Three Edge tests at 390 px passed on an isolated two-Worker Compose stack with schema 0012 | Review exact final branch cloud run |
+| Performance | Reproducible 1/2/4-Worker single and mixed observations. Mixed first-half Jain index 0.960 in three runs | S3 latency sweep and eight-Worker case |
+| Release | Existing v1 Release and Demo address retained. Git history and branch identity reviewed | Final CI, authenticated Render verification and controlled tag/release/deploy |
 
-[Local test evidence](test-report-v2.md)
+[Local test evidence](test-report-v2.md). [Benchmarks](benchmarks-v2.md).

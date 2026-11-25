@@ -16,3 +16,11 @@ The first v2 checkpoint ran on an isolated Compose stack with PostgreSQL, API, s
 The storage snapshot passed 34 default PostgreSQL regressions with the S3-only case skipped in that run. A separate invocation passed that case using a real VersityGW v1.7.0 process. The server returned 412 on a replay after database rollback. The test verified exact bytes, pending recovery after connection refusal, old unreferenced object removal and unavailable referenced bytes.
 
 The live v1 readiness endpoint returned HTTP 200 during baseline inspection. Public genomics, authenticated Render settings and v2 benchmarks are tracked in the acceptance matrix.
+
+## v2 integration checkpoint
+
+- The local Python suite completed 36 tests across real PostgreSQL and VersityGW, including versioned workflows, notification replay, quota/admission regressions and S3 consistency.
+- The full local 390 px Edge pass covered three scenarios against the migrated two-Worker Compose stack. The new scenario registered and uploaded the synthetic Mobility dataset, ran the five-stage DAG, opened provenance and the artifact registry, and verified persistent notification read state.
+- A separate repeatable test terminated the real VersityGW process and restarted it on the same backend directory. PostgreSQL retained the PENDING intent during the outage, and the publisher verified and served the exact staged bytes after restart.
+- The pipeline enabled cloud smoke testing of the actual Render-compatible image with a separate disposable PostgreSQL database.
+- [Benchmarks](benchmarks-v2.md), [deployment gates](deployment-v2.md) and [source audit](privacy-audit-v2.md).
