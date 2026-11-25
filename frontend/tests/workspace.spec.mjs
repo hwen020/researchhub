@@ -134,7 +134,9 @@ test('mobile research workflow publishes artifacts and replays notifications', a
     response.request().method() === 'POST' && response.url().endsWith('/research-workflows'))
   await page.getByRole('button', { name: 'Start research workflow' }).click()
   const response = await responsePromise
-  expect(response.ok()).toBeTruthy()
+  if (!response.ok()) {
+    throw new Error(`Research workflow submission failed: HTTP ${response.status()} ${await response.text()}`)
+  }
   const { id } = await response.json()
   const mobility = page.locator('article[data-run-id="' + id + '"]')
   await expect.poll(async () => {
