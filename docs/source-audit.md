@@ -11,4 +11,4 @@ The inspection used existing local checkouts and public-repository mirrors. The 
 | [Wearable Mobility Research Pipeline](https://github.com/hwen020/wearable-mobility-research-pipeline) | `82cd2f3b9f051c7a0c51fe803f592eae3f77e845` | Inspected `app/analytics.py`, pipeline and test inventory, and MIT terms. Mobility integration is pending. |
 | Ads Attribution Pipeline | No verified local source | No reuse claimed. |
 
-The pre-public audit found no private path, private email, credential, private key or GitHub token in tracked content. The tracked Aging Genomics MIT notice is preserved. ResearchHub itself lacks a top-level license file, so public release remains blocked until the project owner confirms the public license and notice.
+The pre-public audit found no private path, private email, credential, private key or GitHub token in tracked content. The tracked Aging Genomics MIT notice is preserved. ResearchHub is licensed separately by the owner at `LICENSE`; `THIRD_PARTY_NOTICES.md` preserves third-party attribution boundaries and does not relicense unverified work.

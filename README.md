@@ -22,7 +22,11 @@ Export a new bootstrap username and password in the invoking shell before runnin
 
 ## Release verification status
 
-The current 390px Edge browser suite passes 2 tests, the frontend production build passes, migration metadata is clean through the current head, and the dedicated PostgreSQL backend suite passes 25 tests. Public GitHub release and public demo deployment remain separate gates until repository privacy, license and CI approval are complete.
+The current 390px Edge browser suite passes 2 tests, the frontend production build passes, migration metadata is clean through the current head, and the dedicated PostgreSQL backend suite passes 25 tests. GitHub Actions run `45525441466` passed backend, frontend and compose; public repository, tag/release and public demo deployment remain separate publication gates.
+
+## License
+
+ResearchHub's original implementation is licensed under the MIT License in [LICENSE](LICENSE). Third-party notices and source attribution are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Aging Genomics MIT license remains in [docs/aging-genomics-LICENSE.txt](docs/aging-genomics-LICENSE.txt). The license applies only as documented and does not relicense any inspected third-party work.
 
 ## Tests
 
