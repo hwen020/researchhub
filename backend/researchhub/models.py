@@ -137,4 +137,12 @@ system_audit = Table(
     Column("subject_id", String(36), nullable=False),
     Column("timestamp", BigInteger, nullable=False),
 )
+api_rate_limits = Table(
+    "api_rate_limits", metadata,
+    Column("bucket_key", String(64), primary_key=True),
+    Column("window_start", BigInteger, nullable=False),
+    Column("hits", Integer, nullable=False),
+    CheckConstraint("hits > 0"),
+)
+Index("api_rate_limits_window", api_rate_limits.c.window_start)
 

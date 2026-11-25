@@ -1,7 +1,10 @@
 import csv
+import hashlib
+import hmac
 import io
 import os
 import secrets
+import threading
 from typing import Dict, List, Literal
 from uuid import UUID, uuid4
 
@@ -9,14 +12,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, literal, select
+from sqlalchemy import case, delete, func, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 
 from .auth import hash_password, require_project, verify_password
 from .db import connect
 from .finance import decide, request_funds
-from .models import audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, system_audit, users, versions, workers, workflow_runs
+from .models import api_rate_limits, audit, budgets, datasets, events, funding_requests, jobs, memberships, organizations, projects, system_audit, users, versions, workers, workflow_runs
 from .plugins import validate_parameters
 from .queue import IdempotencyConflict, cancel, now_ms, submit
 from .registry import MAX_UPLOAD, compute_inputs, download, register, upload
@@ -29,6 +32,15 @@ security = HTTPBasic(auto_error=False)
 dummy_hash = hash_password(uuid4().hex)
 ALL_ROLES = {"pi", "researcher", "finance"}
 COMPUTE_ROLES = {"pi", "researcher"}
+AUTH_FAILURE_LIMIT = 10
+AUTH_FAILURE_WINDOW_MS = 300_000
+AUTH_SOURCE_FAILURE_LIMIT = 60
+JOB_SUBMISSION_LIMIT = 120
+WORKFLOW_SUBMISSION_LIMIT = 30
+DATASET_UPLOAD_LIMIT = 20
+API_RATE_WINDOW_MS = 60_000
+_rate_cleanup_lock = threading.Lock()
+_last_rate_cleanup_ms = 0
 
 
 class RequestModel(BaseModel):
@@ -103,16 +115,97 @@ def transaction():
         raise HTTPException(503, "Database unavailable") from exc
 
 
+def rate_bucket(scope, identity):
+    secret = engine.url.password or "researchhub-rate-limit"
+    return hmac.new(secret.encode(), (scope + ":" + identity).encode(), hashlib.sha256).hexdigest()
+
+
+def rate_limited(window_ms, timestamp=None):
+    if timestamp is None:
+        with engine.connect() as rate_connection:
+            timestamp = now_ms(rate_connection)
+    window_start = timestamp - timestamp % window_ms
+    seconds = max(1, (window_start + window_ms - timestamp + 999) // 1000)
+    return HTTPException(429, "Rate limit exceeded", headers={"Retry-After": str(seconds)})
+
+
+def check_rate_limit(scope, identity, limit, window_ms):
+    try:
+        with engine.connect() as rate_connection:
+            timestamp = now_ms(rate_connection)
+            window_start = timestamp - timestamp % window_ms
+            count = rate_connection.execute(select(api_rate_limits.c.hits).where(
+                api_rate_limits.c.bucket_key == rate_bucket(scope, identity),
+                api_rate_limits.c.window_start == window_start,
+            )).scalar_one_or_none() or 0
+    except OperationalError as exc:
+        raise HTTPException(503, "Database unavailable") from exc
+    if count >= limit:
+        raise rate_limited(window_ms, timestamp)
+
+
+def record_rate_limit(scope, identity, limit, window_ms):
+    global _last_rate_cleanup_ms
+    try:
+        with engine.begin() as rate_connection:
+            timestamp = now_ms(rate_connection)
+            window_start = timestamp - timestamp % window_ms
+            count = rate_connection.execute(pg_insert(api_rate_limits).values(
+                bucket_key=rate_bucket(scope, identity), window_start=window_start, hits=1,
+            ).on_conflict_do_update(
+                index_elements=[api_rate_limits.c.bucket_key],
+                set_={
+                    "window_start": window_start,
+                    "hits": case(
+                        (api_rate_limits.c.window_start == window_start,
+                         func.least(api_rate_limits.c.hits + 1, limit + 1)),
+                        else_=1,
+                    ),
+                },
+            ).returning(api_rate_limits.c.hits)).scalar_one()
+            with _rate_cleanup_lock:
+                if timestamp - _last_rate_cleanup_ms >= 60_000:
+                    rate_connection.execute(delete(api_rate_limits).where(
+                        api_rate_limits.c.window_start < timestamp - 86_400_000,
+                    ))
+                    _last_rate_cleanup_ms = timestamp
+    except OperationalError as exc:
+        raise HTTPException(503, "Database unavailable") from exc
+    return count
+
+
+def enforce_rate_limit(scope, identity, limit, window_ms):
+    if record_rate_limit(scope, identity, limit, window_ms) > limit:
+        raise rate_limited(window_ms)
+
+
 def authenticate(request: Request, credentials: HTTPBasicCredentials | None = Depends(security), connection=Depends(transaction, scope="function")):
     user = None
     password = "missing credential"
     if credentials is not None:
+        source = request.client.host if request.client else "unknown"
+        account_key = credentials.username.casefold()
+        check_rate_limit("auth_account_failure", account_key, AUTH_FAILURE_LIMIT, AUTH_FAILURE_WINDOW_MS)
+        check_rate_limit("auth_source_failure", source, AUTH_SOURCE_FAILURE_LIMIT, AUTH_FAILURE_WINDOW_MS)
         user = connection.execute(select(users).where(users.c.username == credentials.username[:101])).mappings().one_or_none()
         password = credentials.password
     if not verify_password(password, user["password_hash"] if user else dummy_hash) or user is None:
+        if credentials is not None:
+            account_hits = record_rate_limit("auth_account_failure", account_key, AUTH_FAILURE_LIMIT, AUTH_FAILURE_WINDOW_MS)
+            source_hits = record_rate_limit("auth_source_failure", source, AUTH_SOURCE_FAILURE_LIMIT, AUTH_FAILURE_WINDOW_MS)
+            if account_hits > AUTH_FAILURE_LIMIT or source_hits > AUTH_SOURCE_FAILURE_LIMIT:
+                raise rate_limited(AUTH_FAILURE_WINDOW_MS)
         raise HTTPException(401, "Invalid credentials")
     if user["must_change_password"] and request.url.path not in {"/auth/status", "/auth/password"}:
         raise HTTPException(403, "Password change required")
+    if request.method == "POST":
+        parts = request.url.path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "projects" and parts[2] == "jobs":
+            enforce_rate_limit("job_submission", user["id"], JOB_SUBMISSION_LIMIT, API_RATE_WINDOW_MS)
+        elif len(parts) == 3 and parts[0] == "projects" and parts[2] == "workflows":
+            enforce_rate_limit("workflow_submission", user["id"], WORKFLOW_SUBMISSION_LIMIT, API_RATE_WINDOW_MS)
+        elif len(parts) == 5 and parts[0] == "projects" and parts[2] == "datasets" and parts[4] == "versions":
+            enforce_rate_limit("dataset_upload", user["id"], DATASET_UPLOAD_LIMIT, API_RATE_WINDOW_MS)
     return user
 
 

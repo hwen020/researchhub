@@ -14,7 +14,7 @@ from sqlalchemy.engine import make_url
 from researchhub.db import connect
 from researchhub.finance import decide, request_funds
 from researchhub.auth import hash_password
-from researchhub.models import budgets, events, jobs, memberships, metadata, organizations, projects, system_audit, users
+from researchhub.models import api_rate_limits, budgets, events, jobs, memberships, metadata, organizations, projects, system_audit, users
 from researchhub.queue import cancel, claim, finish, submit
 from researchhub.models import workflow_runs
 from researchhub.workflows import start
@@ -328,4 +328,48 @@ class PostgresIntegration(unittest.TestCase):
             self.assertFalse(finish(conn, job["id"], token, result={"stale": True}))
             history = conn.execute(select(events.c.reason).where(events.c.job_id == job["id"])).scalars().all()
             self.assertIn("deadline_exceeded", history)
+
+    def test_rate_limits_persist_across_engines_and_reject_without_job_write(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from researchhub import api
+
+        organization, project, user_id = (str(uuid4()) for _ in range(3))
+        password = "rate limit fixture password"
+        with self.engine.begin() as conn:
+            conn.execute(organizations.insert().values(id=organization, name="Rate limit fixture"))
+            conn.execute(projects.insert().values(id=project, organization_id=organization, name="Limited project"))
+            conn.execute(budgets.insert().values(project_id=project, limit=0, spent=0))
+            conn.execute(users.insert().values(
+                id=user_id, username="rate-limit-user", password_hash=hash_password(password),
+            ))
+            conn.execute(memberships.insert().values(project_id=project, user_id=user_id, role="pi"))
+
+        other_engine = connect(self.url)
+        self.addCleanup(other_engine.dispose)
+        with patch.object(api, "engine", self.engine), patch.object(api, "AUTH_FAILURE_LIMIT", 2):
+            with TestClient(api.app) as client:
+                for expected in (401, 401, 429):
+                    response = client.get("/projects", auth=("unknown-rate-user", "wrong fixture password"))
+                    self.assertEqual(response.status_code, expected)
+                    if expected == 429:
+                        self.assertTrue(response.headers.get("Retry-After"))
+
+        with patch.object(api, "engine", self.engine), patch.object(api, "AUTH_FAILURE_LIMIT", 10), \
+             patch.object(api, "JOB_SUBMISSION_LIMIT", 1), TestClient(api.app) as client:
+            path = f"/projects/{project}/jobs"
+            body = {"plugin": "summary@1", "parameters": {"observations": [1, 2]}}
+            headers = {"Idempotency-Key": "first-job"}
+            self.assertEqual(client.post(path, json=body, headers=headers,
+                                         auth=("rate-limit-user", password)).status_code, 200)
+            with patch.object(api, "engine", other_engine), TestClient(api.app) as other_client:
+                limited = other_client.post(path, json=body, headers={"Idempotency-Key": "second-job"},
+                                            auth=("rate-limit-user", password))
+            self.assertEqual(limited.status_code, 429)
+            self.assertTrue(limited.headers.get("Retry-After"))
+            with self.engine.begin() as conn:
+                self.assertEqual(conn.execute(select(func.count()).select_from(jobs).where(
+                    jobs.c.project_id == project,
+                )).scalar_one(), 1)
+                self.assertGreater(conn.execute(select(func.count()).select_from(api_rate_limits)).scalar_one(), 0)
 
