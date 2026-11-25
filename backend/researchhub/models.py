@@ -71,6 +71,7 @@ events = Table(
     Column("reason", String(64), nullable=False),
     Column("timestamp", BigInteger, nullable=False),
 )
+Index("job_events_timestamp", events.c.timestamp, events.c.id)
 workflow_runs = Table(
     "workflow_runs", metadata,
     Column("id", String(36), primary_key=True),

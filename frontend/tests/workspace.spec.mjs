@@ -73,6 +73,10 @@ test('administrator creates a project and account with one-time password rotatio
   const replacementPassword = 'browser-rotated-' + suffix
   await page.goto('/')
   await signIn(page, 'fixture-admin')
+  await page.getByRole('button', { name: 'System health' }).click()
+  await expect(page.locator('pre')).toContainText('job_queue_wait_ms')
+  await expect(page.locator('pre')).toContainText('job_execution_ms')
+  await expect(page.locator('pre')).toContainText('http_requests')
   await page.getByRole('button', { name: 'Administration' }).click()
   await page.locator('select[name="organization"]').selectOption({ label: 'Fixture Lab' })
   await page.locator('input[name="name"]').fill(projectName)

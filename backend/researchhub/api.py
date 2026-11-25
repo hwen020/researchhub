@@ -1,10 +1,12 @@
 import csv
+import time
 import hashlib
 import hmac
 import io
 import os
 import secrets
 import threading
+from collections import Counter, deque
 from typing import Dict, List, Literal
 from uuid import UUID, uuid4
 
@@ -39,12 +41,47 @@ JOB_SUBMISSION_LIMIT = 120
 WORKFLOW_SUBMISSION_LIMIT = 30
 DATASET_UPLOAD_LIMIT = 20
 API_RATE_WINDOW_MS = 60_000
+METRICS_EVENT_WINDOW_MS = 86_400_000
+METRICS_EVENT_LIMIT = 20_000
+HTTP_METRICS_SAMPLE_LIMIT = 5_000
 _rate_cleanup_lock = threading.Lock()
 _last_rate_cleanup_ms = 0
+_http_metrics_lock = threading.Lock()
+_http_duration_samples = deque(maxlen=HTTP_METRICS_SAMPLE_LIMIT)
+_http_status_classes = Counter()
 
 
 class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class RequestMetricsMiddleware:
+    def __init__(self, application):
+        self.application = application
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") == "/metrics":
+            await self.application(scope, receive, send)
+            return
+        started = time.perf_counter()
+        status_code = 500
+
+        async def record_response(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            await send(message)
+
+        try:
+            await self.application(scope, receive, record_response)
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            with _http_metrics_lock:
+                _http_duration_samples.append(elapsed_ms)
+                _http_status_classes[f"{status_code // 100}xx"] += 1
+
+
+app.add_middleware(RequestMetricsMiddleware)
 
 
 class DatasetReference(BaseModel):
@@ -177,6 +214,47 @@ def record_rate_limit(scope, identity, limit, window_ms):
 def enforce_rate_limit(scope, identity, limit, window_ms):
     if record_rate_limit(scope, identity, limit, window_ms) > limit:
         raise rate_limited(window_ms)
+
+
+def distribution(samples):
+    ordered = sorted(samples)
+    if not ordered:
+        return {"count": 0, "p50": None, "p95": None, "max": None}
+    return {
+        "count": len(ordered),
+        "p50": round(ordered[(len(ordered) - 1) // 2], 3),
+        "p95": round(ordered[min(len(ordered) - 1, (95 * len(ordered) + 99) // 100 - 1)], 3),
+        "max": round(ordered[-1], 3),
+    }
+
+
+def job_event_metrics(connection, timestamp):
+    rows = connection.execute(select(
+        events.c.job_id, events.c.attempt, events.c.state, events.c.timestamp,
+    ).where(events.c.timestamp >= timestamp - METRICS_EVENT_WINDOW_MS)
+        .order_by(events.c.timestamp.desc(), events.c.id.desc())
+        .limit(METRICS_EVENT_LIMIT)).mappings().all()
+    queued_at = {}
+    running_at = {}
+    queue_waits = []
+    execution_times = []
+    for event in reversed(rows):
+        job_id = event["job_id"]
+        attempt = event["attempt"]
+        state = event["state"]
+        event_time = event["timestamp"]
+        if state in {"QUEUED", "RETRYING"}:
+            queued_at[job_id] = event_time
+        if state == "RUNNING":
+            previous = queued_at.pop(job_id, None)
+            if previous is not None and event_time >= previous:
+                queue_waits.append(event_time - previous)
+            running_at[(job_id, attempt)] = event_time
+        if state in {"SUCCEEDED", "FAILED", "RETRYING", "CANCELLED"}:
+            started = running_at.pop((job_id, attempt), None)
+            if started is not None and event_time >= started:
+                execution_times.append(event_time - started)
+    return distribution(queue_waits), distribution(execution_times)
 
 
 def authenticate(request: Request, credentials: HTTPBasicCredentials | None = Depends(security), connection=Depends(transaction, scope="function")):
@@ -444,8 +522,21 @@ def metrics(user=Depends(authenticate), connection=Depends(transaction, scope="f
     retries = connection.execute(select(func.count()).select_from(events).where(
         events.c.state == "RETRYING",
     )).scalar_one()
+    queue_wait, execution = job_event_metrics(connection, now_ms(connection))
+    with _http_metrics_lock:
+        http_durations = list(_http_duration_samples)
+        http_status_classes = dict(_http_status_classes)
     return {"jobs_by_state": states, "workers_online": active, "retries": retries,
-            "queue_depth": states.get("QUEUED", 0) + states.get("RETRYING", 0)}
+            "queue_depth": states.get("QUEUED", 0) + states.get("RETRYING", 0),
+            "job_queue_wait_ms": queue_wait,
+            "job_execution_ms": execution,
+            "job_metrics_window": {"hours": 24, "max_events": METRICS_EVENT_LIMIT},
+            "http_requests": {
+                "status_classes": http_status_classes,
+                "duration_ms": distribution(http_durations),
+                "sample_limit": HTTP_METRICS_SAMPLE_LIMIT,
+                "scope": "per API process; last 5000 completed requests",
+            }}
 
 
 @app.get("/projects")

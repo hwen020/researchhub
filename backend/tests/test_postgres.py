@@ -373,3 +373,47 @@ class PostgresIntegration(unittest.TestCase):
                 )).scalar_one(), 1)
                 self.assertGreater(conn.execute(select(func.count()).select_from(api_rate_limits)).scalar_one(), 0)
 
+    def test_metrics_pair_persisted_job_events_and_bound_http_samples(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from researchhub import api
+
+        metric_time = int(time.time() * 1000)
+        password = "metrics fixture password"
+        with self.engine.begin() as conn:
+            conn.execute(users.insert().values(
+                id="metrics-admin", username="metrics-admin", password_hash=hash_password(password),
+                platform_admin=1,
+            ))
+            job = submit(conn, "project", "metrics-job", "summary@1", {"observations": [1, 2]})
+            conn.execute(events.delete().where(events.c.job_id == job["id"]))
+            conn.execute(events.insert(), [
+                {"job_id": job["id"], "attempt": 0, "state": "QUEUED", "reason": "submitted", "timestamp": metric_time - 20_000},
+                {"job_id": job["id"], "attempt": 1, "state": "RUNNING", "reason": "claimed", "timestamp": metric_time - 17_000},
+                {"job_id": job["id"], "attempt": 1, "state": "RETRYING", "reason": "retry", "timestamp": metric_time - 12_000},
+                {"job_id": job["id"], "attempt": 2, "state": "RUNNING", "reason": "claimed", "timestamp": metric_time - 11_000},
+                {"job_id": job["id"], "attempt": 2, "state": "SUCCEEDED", "reason": "finished", "timestamp": metric_time - 6_000},
+            ])
+
+        with api._http_metrics_lock:
+            api._http_duration_samples.clear()
+            api._http_status_classes.clear()
+        with patch.object(api, "engine", self.engine), patch.object(api, "now_ms", return_value=metric_time), \
+             TestClient(api.app) as client:
+            self.assertEqual(client.get("/healthz").status_code, 200)
+            self.assertEqual(client.get("/projects").status_code, 401)
+            response = client.get("/metrics", auth=("metrics-admin", password))
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body["job_queue_wait_ms"], {"count": 2, "p50": 1000, "p95": 3000, "max": 3000})
+            self.assertEqual(body["job_execution_ms"], {"count": 2, "p50": 5000, "p95": 5000, "max": 5000})
+            self.assertEqual(body["job_metrics_window"], {"hours": 24, "max_events": 20_000})
+            self.assertEqual(body["http_requests"]["duration_ms"]["count"], 2)
+            self.assertEqual(body["http_requests"]["status_classes"], {"2xx": 1, "4xx": 1})
+            with api._http_metrics_lock:
+                api._http_duration_samples.extend(float(value) for value in range(api.HTTP_METRICS_SAMPLE_LIMIT + 1))
+            capped = client.get("/metrics", auth=("metrics-admin", password)).json()["http_requests"]
+            self.assertEqual(capped["duration_ms"]["count"], api.HTTP_METRICS_SAMPLE_LIMIT)
+            self.assertEqual(capped["duration_ms"]["max"], float(api.HTTP_METRICS_SAMPLE_LIMIT))
+            self.assertEqual(capped["sample_limit"], api.HTTP_METRICS_SAMPLE_LIMIT)
+
