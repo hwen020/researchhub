@@ -1,10 +1,15 @@
 import os
 import hashlib
+import base64
+import json
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
@@ -416,4 +421,81 @@ class PostgresIntegration(unittest.TestCase):
             self.assertEqual(capped["duration_ms"]["count"], api.HTTP_METRICS_SAMPLE_LIMIT)
             self.assertEqual(capped["duration_ms"]["max"], float(api.HTTP_METRICS_SAMPLE_LIMIT))
             self.assertEqual(capped["sample_limit"], api.HTTP_METRICS_SAMPLE_LIMIT)
+
+    def test_api_restart_preserves_submitted_job_and_idempotency(self):
+        username = "api-restart-user"
+        password = "api restart fixture password"
+        user_id = str(uuid4())
+        with self.engine.begin() as conn:
+            conn.execute(users.insert().values(
+                id=user_id, username=username, password_hash=hash_password(password),
+            ))
+            conn.execute(memberships.insert().values(project_id="project", user_id=user_id, role="pi"))
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        authorization = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+
+        def request(path, method="GET", body=None, key=None):
+            headers = {"Authorization": authorization}
+            data = None
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+                data = json.dumps(body).encode()
+            if key is not None:
+                headers["Idempotency-Key"] = key
+            request_object = urllib.request.Request(base_url + path, data=data, headers=headers, method=method)
+            with urllib.request.urlopen(request_object, timeout=2) as response:
+                return response.status, json.loads(response.read())
+
+        def wait_until_ready():
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(base_url + "/readyz", timeout=1) as response:
+                        if response.status == 200:
+                            return
+                except (OSError, urllib.error.URLError):
+                    time.sleep(.1)
+            self.fail("API did not become ready")
+
+        server_args = ("-m", "uvicorn", "researchhub.api:app", "--host", "127.0.0.1", "--port", str(port))
+        with patch.dict(os.environ, RESEARCHHUB_STORAGE=tempfile.gettempdir()):
+            first = self.launch(*server_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wait_until_ready()
+        path = "/projects/project/jobs"
+        body = {"plugin": "summary@1", "parameters": {"observations": [2, 4, 6]}}
+        status, created = request(path, "POST", body, "api-restart-idempotency")
+        self.assertEqual(status, 200)
+        first.terminate()
+        first.wait(timeout=10)
+
+        with patch.dict(os.environ, RESEARCHHUB_STORAGE=tempfile.gettempdir()):
+            second = self.launch(*server_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wait_until_ready()
+        status, rows = request(path)
+        self.assertEqual(status, 200)
+        persisted = next(row for row in rows if row["id"] == created["id"])
+        self.assertEqual(persisted["state"], "QUEUED")
+        status, repeated = request(path, "POST", body, "api-restart-idempotency")
+        self.assertEqual(status, 200)
+        self.assertEqual(repeated["id"], created["id"])
+
+    def test_api_reports_database_unavailable_then_recovers(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        from researchhub import api
+
+        unavailable = connect(self.url.set(port=1).update_query_dict({"connect_timeout": "1"}))
+        self.addCleanup(unavailable.dispose)
+        with patch.object(api, "engine", unavailable), TestClient(api.app) as client:
+            response = client.get("/readyz")
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json(), {"detail": "Database unavailable"})
+        with patch.object(api, "engine", self.engine), TestClient(api.app) as client:
+            response = client.get("/readyz")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"status": "ready"})
 

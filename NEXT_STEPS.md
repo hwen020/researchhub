@@ -1,3 +1,3 @@
 # Next steps
 
-Use [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) as the resume point. Edge sign-in, mobile workflow, administration/first-login rotation, API rate limits and real operational metrics are implemented. Next add dedicated API restart/PostgreSQL outage recovery tests, then run complete backend/frontend/Edge/Chromium/Compose regressions. Keep each verified phase committed and update the status files. No public release or Render service has been created.
+Use [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) as the resume point. Edge sign-in, administration, rate limits, real metrics and actual API/PostgreSQL restart recovery now pass dedicated acceptance checks. Next rebuild current Compose images and run the complete backend/frontend/Edge/Chromium/Compose suite, then update release docs and perform privacy/license/history audits. No public repository, v1 tag or Render service has been created.
