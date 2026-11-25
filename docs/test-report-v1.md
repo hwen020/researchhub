@@ -11,7 +11,7 @@ The formal release gate remains open.
 | Frontend build | PASS. TypeScript and production bundle built. |
 | Compose | PASS for container startup with two workers, frontend readiness route, migration head and PostgreSQL recovery. |
 | Browser | PASS. 2 tests passed in 390px Edge: existing project/job/DAG/dataset/download/funding/audit workflow and admin project/account/member/first-login rotation workflow. |
-| GitHub Actions | NOT RUN against the independent public repository. The workflow is configured for backend, frontend, Compose and browser, but the independent remote and GitHub-authenticated CI run remain open. |
-| Public demo | NOT DEPLOYED. Render Free demo feasibility and public guest isolation remain open. |
+| GitHub Actions | IN PROGRESS against the private independent repository `hwen020/researchhub`. The first Ubuntu 24.04 rerun is being observed after the first runner failure was fixed. Public repository and v1 tag remain blocked until CI passes and the license gate is confirmed. |
+| Public demo | NOT DEPLOYED. Render login/authorization was unavailable in the current browser session, and no existing Render service was modified. Render Free demo feasibility and public guest isolation remain open. |
 
 See [development handoff](../DEVELOPMENT_STATUS.md) for remaining release work.
