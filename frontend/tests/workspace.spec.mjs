@@ -128,7 +128,7 @@ test('mobile research workflow publishes artifacts and replays notifications', a
   await expect(page.getByRole('button', { name: 'Download dataset' })).toBeVisible()
 
   await page.getByRole('button', { name: 'Workflows', exact: true }).click()
-  await page.getByLabel('Discipline').selectOption('mobility')
+  await page.getByRole('combobox', { name: 'Discipline', exact: true }).selectOption('mobility')
   await page.getByRole('combobox', { name: 'Dataset', exact: true }).selectOption({ label: datasetName })
   const requestPromise = page.waitForRequest((request) =>
     request.method() === 'POST' && request.url().endsWith('/research-workflows'))
